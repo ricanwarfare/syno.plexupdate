@@ -219,10 +219,65 @@ The script utilizes (4) default but user-configurable variables:
 1. `SelfUpdate=0`
    * A 0=off 1=on toggle to enable self-updating to the latest packaged release. Change this to **1** to enable self-updating that follows the same minimum age requirement as the Plex updates
 
+# Command Line Options
+
+```
+Usage: syno.plexupdate.sh [-a #] [-c p|b] [-m] [-r] [-b] [-h]
+  -a: Override the minimum age in days
+  -c: Override the update channel (p for Public, b for Beta)
+  -m: Update from the master branch (non-release version)
+  -r: Rollback to previous installed version
+  -b: Skip minimum age check (install immediately)
+  -h: Display this help message
+```
+
+### Rollback Feature
+
+To rollback to the previous Plex version:
+
+```bash
+bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -r
+```
+
+This will:
+1. Find the second-most-recent `.spk` file in the Archive/Packages directory
+2. Stop Plex Media Server
+3. Install the previous package
+4. Restart Plex Media Server
+5. Report success/failure via DSM notification
+
+### Skip Age Check
+
+To bypass the minimum age requirement and install immediately:
+
+```bash
+bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -b
+```
+
 # Known Non-Issues
 
 * If the script runs successfully, the DSM Task status will show "`Interrupted (1)`" and the notification email will state "`Current status: 1 (Interrupted)`". This exit/error status of (1) is intentionally caused by the script in order to force the DSM to perform an email notification of a successful update (in the form of an interruption/error). The DSM otherwise would only send notifications of failed task events, and notifications of successful Plex updates would not be possible.
 * If DSM 6 is not configured to allow 3rd-party "trusted publishers", the script will log "`error = [289]`" during the package installation process. Synology DSM 6 has been known to sporadically "lose" 3rd-party security certificates for unknown reasons. If this happens, you will have to re-add the Plex 'Public Key Certificate' to your system. DSM 7 no longer has this requirement.
+
+# Changelog
+
+### v4.8.0 (ricanwarfare fork)
+
+**New Features:**
+- Added `-r` flag for rollback to previous installed version
+- Added `-b` flag to skip minimum age check
+- Added concurrent execution protection via lock file (`/tmp/syno.plexupdate.lock`)
+- Added `set -euo pipefail` for stricter error handling
+- Token masking in logs (only last 4 characters visible)
+
+**Improvements:**
+- Better handling of stale lock files (checks if PID is still running)
+- Updated help text with new options
+- Added fork attribution in header
+
+**Security:**
+- Plex tokens are now masked in debug output
+- Lock file prevents multiple simultaneous runs
 
 # Common Mistakes
 

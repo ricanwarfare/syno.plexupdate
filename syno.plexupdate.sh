@@ -6,6 +6,7 @@
 # This must be run as root to natively control running services
 #
 # Author @michealespinola https://github.com/michealespinola/syno.plexupdate
+# Fork maintained by @ricanwarfare https://github.com/ricanwarfare/syno.plexupdate
 #
 # Original update concept based on: https://github.com/martinorob/plexupdate
 #
@@ -20,11 +21,27 @@ SrceFileNm=${SrceFllPth##*/}
 # REDIRECT STDOUT TO TEE IN ORDER TO DUPLICATE THE OUTPUT TO THE TERMINAL AS WELL AS A .LOG FILE
 exec > >(tee "$SrceFllPth.log") 2>"$SrceFllPth.debug"
 
-# ENABLE XTRACE OUTPUT FOR DEBUG FILE
+# ENABLE STRICT ERROR HANDLING AND XTRACE FOR DEBUG
+set -euo pipefail
 set -x
 
+# CONCURRENT EXECUTION PROTECTION (LOCK FILE)
+LOCKFILE="/tmp/syno.plexupdate.lock"
+if [ -f "$LOCKFILE" ]; then
+  LockPid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
+  if kill -0 "$LockPid" 2>/dev/null; then
+    printf ' %s\n\n' "* Another instance is already running (PID: $LockPid) - exiting.."
+    exit 1
+  else
+    # Stale lock file, remove it
+    rm -f "$LOCKFILE"
+  fi
+fi
+trap 'rm -f "$LOCKFILE"' EXIT
+echo $$ > "$LOCKFILE"
+
 # SCRIPT VERSION
-SpuscrpVer=4.7.0
+SpuscrpVer=4.8.0
 MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
@@ -87,7 +104,7 @@ else
 fi
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
-while getopts ":a:c:mh" opt; do
+while getopts ":a:c:mr:bh" opt; do
   case ${opt} in
     a) # AUTO-UPDATE SCRIPT AND PLEX
       # Check if the value is numerical only
@@ -117,11 +134,20 @@ while getopts ":a:c:mh" opt; do
       MasterUpdt=true
       printf '%16s %s\n'           "Override:" "-m, Forcing script update from Master branch"
       ;;
+    r) # ROLLBACK TO PREVIOUS VERSION
+      Rollback=true
+      ;;
+    b) # SKIP AGE CHECK (FORCE INSTALL)
+      SkipAgeCheck=true
+      printf '%16s %s\n'           "Override:" "-b, Skipping minimum age check"
+      ;;
     h) # HELP OPTION
-      printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-h]"
+      printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-r] [-b] [-h]"
       printf ' %s\n'   "-a: Override the minimum age in days"
       printf ' %s\n'   "-c: Override the update channel (p for Public, b for Beta)"
       printf ' %s\n'   "-m: Update from the master branch (non-release version)"
+      printf ' %s\n'   "-r: Rollback to previous installed version"
+      printf ' %s\n'   "-b: Skip minimum age check (install immediately)"
       printf ' %s\n\n' "-h: Display this help message"
       exit 0
       ;;
@@ -321,9 +347,60 @@ fi
 
 # SCRAPE PLEX ONLINE TOKEN
 PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml")
+# CREATE MASKED TOKEN VERSION FOR LOGGING (SECURITY)
+PlexOTokenMasked="****${PlexOToken: -4}"
 # SCRAPE PLEX SERVER UPDATE CHANNEL
 PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml")
 [ -n "$UpdtChannl" ] && PlexChannl="$UpdtChannl" # Override with command line option
+
+# ROLLBACK FUNCTIONALITY
+if [ "$Rollback" = "true" ]; then
+  printf "\n%s\n" "ROLLBACK TO PREVIOUS VERSION:"
+  printf "%s\n" "----------------------------------------"
+  # Find the previous package (second most recent)
+  PreviousPkg=$(ls -t "$SrceFolder/Archive/Packages/PlexMediaServer"*.spk 2>/dev/null | head -2 | tail -1)
+  if [ -z "$PreviousPkg" ]; then
+    printf ' %s\n' "* No previous package found in Archive - cannot rollback"
+    printf "%s\n" "----------------------------------------"
+    /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed. No previous package found."}'
+    exit 1
+  fi
+  printf '%16s %s\n' "Previous Package:" "$(basename "$PreviousPkg")"
+  printf '%16s %s\n' "Current Version:" "$RunVersion"
+  printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
+  /usr/syno/bin/synopkg stop    "PlexMediaServer"
+  printf "\n%s\n" "Installing previous package (JSON):"
+  /usr/syno/bin/synopkg install "$PreviousPkg" | \
+    jq -c '.results[] |= (
+      if (.scripts // empty) | type == "array" then
+        .scripts |= map(
+          if .message then
+            .message |= (
+              gsub("<[^>]*>"; "")     # Strip HTML
+              | split("\n")[0]        # Keep only the first real line
+            )
+          else . end
+        )
+      else .
+      end
+    )'
+  printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
+  /usr/syno/bin/synopkg start   "PlexMediaServer"
+  printf "%s\n" "----------------------------------------"
+  NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
+  NowVersion=$(grep -oP '^.+?(?=\-)' < <(printf '%s' "$NowVersion"))
+  printf '%16s %s\n' "Rollback from:" "$RunVersion"
+  printf '%16s %s'             "to:" "$NowVersion"
+  if [ -n "$NowVersion" ]; then
+    printf ' %s\n' "succeeded!"
+    /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback completed successfully"}'
+  else
+    printf ' %s\n' "failed!"
+    /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed."}'
+  fi
+  exit 0
+fi
+
 if [ -z "$PlexChannl" ]; then
   # DEFAULT TO PUBLIC SERVER UPDATE CHANNEL IF NULL (NEVER SET) VALUE
   ChannlName=Public
