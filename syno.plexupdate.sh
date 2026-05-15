@@ -107,6 +107,8 @@ else
   exit 1
 fi
 
+MasterUpdt=false
+
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mr:bh" opt; do
   case ${opt} in
