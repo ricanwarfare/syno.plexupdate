@@ -108,6 +108,10 @@ else
 fi
 
 MasterUpdt=false
+Rollback=false
+SkipAgeCheck=false
+UpdtChannl=""
+ExitStatus=""
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mr:bh" opt; do
