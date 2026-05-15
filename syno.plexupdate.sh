@@ -22,7 +22,7 @@ SrceFileNm=${SrceFllPth##*/}
 exec > >(tee "$SrceFllPth.log") 2>"$SrceFllPth.debug"
 
 # ENABLE STRICT ERROR HANDLING AND XTRACE FOR DEBUG
-set -euo pipefail
+set -uo pipefail
 set -x
 
 # CONCURRENT EXECUTION PROTECTION (LOCK FILE)
@@ -102,6 +102,10 @@ Rollback=false
 SkipAgeCheck=false
 UpdtChannl=""
 ExitStatus=""
+
+# PRINT SCRIPT STATUS/DEBUG INFO
+printf '%16s %s\n'                   "Script:" "$SrceFileNm"
+printf '%16s %s\n'               "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
 
 # CHECK FOR BASIC INTERNET CONNECTIVITY
 if nslookup one.one.one.one >/dev/null 2>&1; then
@@ -192,6 +196,16 @@ TodaysDate=$(date +%s)
 
 # SCRAPE GITHUB WEBSITE FOR LATEST INFO
 GitHubRepo=ricanwarfare/syno.plexupdate
+SpusNewVer=""
+SpusApiRlm=""
+SpusApiRlr=""
+SpusApiMsg=""
+SpusApiDoc=""
+SpusRlDate=""
+SpusRelAge=""
+SpusDwnUrl=""
+SpusRelDes=""
+SpusHlpUrl=""
 if GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHubRepo/releases?per_page=1); then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   GitHubJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$GitHubHtml") | tr -d '\0')
@@ -233,8 +247,6 @@ else
 fi
 
 # PRINT SCRIPT STATUS/DEBUG INFO
-printf '%16s %s\n'               "Script:" "$SrceFileNm"
-printf '%16s %s\n'           "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
 printf '%16s %s\n'      "Running Ver:" "$SpuscrpVer"
 
 if [ "$SpusNewVer" = "null" ]; then
@@ -449,6 +461,14 @@ else
 fi
 
 # SCRAPE PLEX WEBSITE FOR UPDATE INFO
+NewVerFull=""
+NewVersion=""
+NewVerDate=""
+NewVerAddd=""
+NewVerFixd=""
+NewDwnlUrl=""
+NewPackage=""
+PackageAge=""
 if PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl"); then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   PlexTvJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$PlexTvHtml") | tr -d '\0')
