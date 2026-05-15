@@ -540,7 +540,7 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
   printf "\n"
 
   # DOWNLOAD AND INSTALL THE PLEX UPDATE
-  if [ "$PackageAge" -ge "$MinimumAge" ]; then
+  if [ "$PackageAge" -ge "$MinimumAge" ] || [ "$SkipAgeCheck" = "true" ]; then
     printf "%s\n" "INSTALLING NEW PACKAGE:"
     printf "%s\n" "----------------------------------------"
     printf "%s\n" "Downloading PlexMediaServer package:"
