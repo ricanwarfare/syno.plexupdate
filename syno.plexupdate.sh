@@ -188,7 +188,7 @@ fi
 TodaysDate=$(date +%s)
 
 # SCRAPE GITHUB WEBSITE FOR LATEST INFO
-GitHubRepo=michealespinola/syno.plexupdate
+GitHubRepo=ricanwarfare/syno.plexupdate
 if GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHubRepo/releases?per_page=1); then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   GitHubJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$GitHubHtml") | tr -d '\0')
