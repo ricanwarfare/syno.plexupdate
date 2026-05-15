@@ -214,17 +214,23 @@ if GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHu
   # SCRAPE EXPECTED RELEASE-RELATED INFO
   SpusNewVer=$(jq -r '.[].tag_name'                         < <(printf '%s' "$GitHubJson"))
   SpusNewVer=${SpusNewVer#v}
-  SpusRlDate=$(jq -r '.[].published_at'                     < <(printf '%s' "$GitHubJson"))
-  SpusRlDate=$(date --date "$SpusRlDate" +'%s')
-  SpusRelAge=$(((TodaysDate-SpusRlDate)/86400))
-  if [ "$MasterUpdt" = "true" ]; then
-    SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/master/syno.plexupdate.sh
-    SpusRelDes=$'* Check GitHub for master branch commit messages and extended descriptions'
+  if [ "$SpusNewVer" != "null" ] && [ -n "$SpusNewVer" ]; then
+    SpusRlDate=$(jq -r '.[].published_at'                     < <(printf '%s' "$GitHubJson"))
+    SpusRlDate=$(date --date "$SpusRlDate" +'%s')
+    SpusRelAge=$(((TodaysDate-SpusRlDate)/86400))
+    if [ "$MasterUpdt" = "true" ]; then
+      SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/master/syno.plexupdate.sh
+      SpusRelDes=$'* Check GitHub for master branch commit messages and extended descriptions'
+    else
+      SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/v$SpusNewVer/syno.plexupdate.sh
+      SpusRelDes=$(jq -r '.[].body'                             < <(printf '%s' "$GitHubJson"))
+    fi
+    SpusHlpUrl=https://github.com/$GitHubRepo/issues
   else
-    SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/v$SpusNewVer/syno.plexupdate.sh
-    SpusRelDes=$(jq -r '.[].body'                             < <(printf '%s' "$GitHubJson"))
+    SpusNewVer=""
+    printf ' %s\n\n' "* NO RELEASES FOUND ON GITHUB REPO.."
+    ExitStatus=1
   fi
-  SpusHlpUrl=https://github.com/$GitHubRepo/issues
 else
   printf ' %s\n\n' "* UNABLE TO CHECK FOR LATEST VERSION OF SCRIPT.."
   ExitStatus=1
