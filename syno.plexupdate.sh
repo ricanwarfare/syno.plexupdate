@@ -352,6 +352,7 @@ RunVersion=$(strip_build_version "$RunVersion")
 # SCRAPE PMS FOLDER LOCATION AND CREATE ARCHIVED PACKAGES DIR W/OLD FILE CLEANUP
 PlexFolder=$(readlink /var/packages/PlexMediaServer/shares/PlexMediaServer)
 PlexFolder="$PlexFolder/AppData/Plex Media Server"
+mkdir -p "$SrceFolder/Archive/Packages"
 
 if [ -d "$PlexFolder/Updates" ]; then
   mv -f "$PlexFolder/Updates/"* "$SrceFolder/Archive/Packages/" 2>/dev/null
