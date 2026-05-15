@@ -67,6 +67,7 @@ create_or_update_config() {
   if [ ! -f "$ConfigFile" ]; then
     printf ' %s\n\n' "* CONFIGURATION FILE (config.ini) IS MISSING, CREATING DEFAULT SETUP.."
     touch "$ConfigFile"
+    ExitStatus=1
   fi
   # Function to add key-value pairs along with comments if not present
   add_config_with_comment() {
@@ -121,7 +122,7 @@ fi
 
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
-while getopts ":a:c:mr:bh" opt; do
+while getopts ":a:c:mrbh" opt; do
   case ${opt} in
     a) # AUTO-UPDATE SCRIPT AND PLEX
       # Check if the value is numerical only
@@ -369,11 +370,8 @@ if [ -d "$PlexFolder/Updates" ]; then
   fi
 fi
 
-if [ -d "$PlexFolder/Updates" ]; then
-  mv -f "$PlexFolder/Updates/"* "$SrceFolder/Archive/Packages/" 2>/dev/null
-  if [ -n "$(find "$PlexFolder/Updates/" -prune -empty 2>/dev/null)" ]; then
-    rmdir "$PlexFolder/Updates/"
-  fi
+if [ -d "$SrceFolder/Archive/Packages" ]; then
+  find "$SrceFolder/Archive/Packages" -type f -name "PlexMediaServer*.spk" -mtime +"$OldUpdates" -delete
 fi
 
 # SCRAPE PLEX ONLINE TOKEN
@@ -590,11 +588,16 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
         printf "%s\n" "NEW FEATURES:"
         printf "%s\n" "----------------------------------------"
         printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
-
+        printf "%s\n" "----------------------------------------"
+        printf "\n"
+      fi
+      if [ -n "$NewVerFixd" ]; then
+        # SHOW FIXED PLEX FEATURES
         printf "%s\n" "FIXED FEATURES:"
         printf "%s\n" "----------------------------------------"
         printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
         printf "%s\n" "----------------------------------------"
+        printf "\n"
       fi
       printf "\n"
       /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update task completed successfully"}'
