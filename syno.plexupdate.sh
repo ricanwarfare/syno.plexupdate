@@ -103,10 +103,6 @@ SkipAgeCheck=false
 UpdtChannl=""
 ExitStatus=""
 
-# PRINT SCRIPT STATUS/DEBUG INFO
-printf '%16s %s\n'                   "Script:" "$SrceFileNm"
-printf '%16s %s\n'               "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
-
 # CHECK FOR BASIC INTERNET CONNECTIVITY
 if nslookup one.one.one.one >/dev/null 2>&1; then
  #printf '\n %s\n\n' "* OK: DNS resolution works.."
@@ -237,8 +233,8 @@ else
 fi
 
 # PRINT SCRIPT STATUS/DEBUG INFO
-#printf '%16s %s\n'           "Script:" "$SrceFileNm"
-#printf '%16s %s\n'       "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
+printf '%16s %s\n'               "Script:" "$SrceFileNm"
+printf '%16s %s\n'           "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
 printf '%16s %s\n'      "Running Ver:" "$SpuscrpVer"
 
 if [ "$SpusNewVer" = "null" ]; then
