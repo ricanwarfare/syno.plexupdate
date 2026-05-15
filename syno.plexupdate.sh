@@ -91,6 +91,18 @@ if [ -f "$SrceFolder/config.ini" ]; then
   source "$SrceFolder/config.ini"
 fi
 
+# SET DEFAULTS FOR ALL CONFIG VARIABLES
+MinimumAge="${MinimumAge:-7}"
+OldUpdates="${OldUpdates:-60}"
+NetTimeout="${NetTimeout:-900}"
+SelfUpdate="${SelfUpdate:-0}"
+
+MasterUpdt=false
+Rollback=false
+SkipAgeCheck=false
+UpdtChannl=""
+ExitStatus=""
+
 # PRINT SCRIPT STATUS/DEBUG INFO
 printf '%16s %s\n'                   "Script:" "$SrceFileNm"
 printf '%16s %s\n'               "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
@@ -107,11 +119,6 @@ else
   exit 1
 fi
 
-MasterUpdt=false
-Rollback=false
-SkipAgeCheck=false
-UpdtChannl=""
-ExitStatus=""
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mr:bh" opt; do
