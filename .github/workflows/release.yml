@@ -1,0 +1,37 @@
+name: Auto Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from script
+        id: version
+        run: |
+          VERSION=$(grep -oP 'readonly SpuscrpVer=\K[^\s]+' syno.plexupdate.sh)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches script version
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          SCRIPT_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$TAG_VERSION" != "$SCRIPT_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match script version ($SCRIPT_VERSION)"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.version.outputs.version }}
