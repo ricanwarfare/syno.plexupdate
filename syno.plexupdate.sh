@@ -41,12 +41,17 @@ trap 'rm -f "$LOCKFILE"' EXIT
 echo $$ > "$LOCKFILE"
 
 # SCRIPT VERSION
-SpuscrpVer=4.8.0
-MinDSMVers=7.0
+readonly SpuscrpVer=4.8.0
+readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
 printf "%s\n" "SYNO.PLEX UPDATE SCRIPT v$SpuscrpVer for DSM 7"
 printf "\n"
+
+# HELPER: STRIP BUILD NUMBER FROM VERSION STRING (e.g. "1.32.0.6918-1234567" -> "1.32.0.6918")
+strip_build_version() {
+  grep -oP '^.+?(?=\-)' < <(printf '%s' "$1")
+}
 
 # CHECK IF ROOT
 if [ "$EUID" -ne "0" ]; then
@@ -62,7 +67,6 @@ create_or_update_config() {
   if [ ! -f "$ConfigFile" ]; then
     printf ' %s\n\n' "* CONFIGURATION FILE (config.ini) IS MISSING, CREATING DEFAULT SETUP.."
     touch "$ConfigFile"
-    ExitStatus=1
   fi
   # Function to add key-value pairs along with comments if not present
   add_config_with_comment() {
@@ -169,8 +173,7 @@ fi
 if [ ! -f "$SrceFolder/Archive/Scripts/syno.plexupdate.v$SpuscrpVer.sh" ]; then
   cp "$SrceFllPth" "$SrceFolder/Archive/Scripts/syno.plexupdate.v$SpuscrpVer.sh"
 else
-  cmp -s "$SrceFllPth" "$SrceFolder/Archive/Scripts/syno.plexupdate.v$SpuscrpVer.sh"
-  if [ "$?" -ne "0" ]; then
+  if ! cmp -s "$SrceFllPth" "$SrceFolder/Archive/Scripts/syno.plexupdate.v$SpuscrpVer.sh"; then
     cp "$SrceFllPth" "$SrceFolder/Archive/Scripts/syno.plexupdate.v$SpuscrpVer.sh"
   fi
 fi
@@ -180,8 +183,7 @@ TodaysDate=$(date +%s)
 
 # SCRAPE GITHUB WEBSITE FOR LATEST INFO
 GitHubRepo=michealespinola/syno.plexupdate
-GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHubRepo/releases?per_page=1)
-if [ "$?" -eq "0" ]; then
+if GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHubRepo/releases?per_page=1); then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   GitHubJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$GitHubHtml") | tr -d '\0')
   # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
@@ -244,15 +246,14 @@ if [[ "$SpusNewVer" != "null" ]]; then
         printf "\n"
         printf "%s\n" "INSTALLING NEW SCRIPT:"
         printf "%s\n" "----------------------------------------"
-        /bin/wget -nv -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl"                               2>&1
-        if [ "$?" -eq "0" ]; then
+        if /bin/wget -nv -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl" 2>&1; then
           # MAKE A COPY FOR UPGRADE COMPARISON BECAUSE WE ARE GOING TO MOVE NOT COPY THE NEW FILE
           cp -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" 2>&1
           # MOVE-OVERWRITE INSTEAD OF COPY-OVERWRITE TO NOT CORRUPT RUNNING IN-MEMORY VERSION OF SCRIPT
           mv -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/$SrceFileNm"                     2>&1
           printf "%s\n" "----------------------------------------"
           cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"
-          if [ "$?" -eq "0" ]; then
+          if cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"; then
             printf '%17s%s\n' '' "* Script update succeeded!"
             /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update completed successfully"}'
             ExitStatus=1
@@ -276,10 +277,10 @@ if [[ "$SpusNewVer" != "null" ]]; then
           ExitStatus=1
         fi
       else
-        printf ' \n%s\n' "Update newer than $MinimumAge days - skipping.."
+        printf ' \n%s\n' "Script update is too new ($SpusRelAge days), requires $MinimumAge+ days - skipping.."
       fi
       # DELETE TEMP COMPARISON FILE
-      find "$SrceFolder/Archive/Scripts" -type f -name "$SrceFileNm.cmp" -delete
+      find "$SrceFolder/Archive/Scripts" -maxdepth 1 -type f -name "$SrceFileNm.cmp" -delete
     fi
   
   else
@@ -327,7 +328,7 @@ fi
 
 # SCRAPE CURRENTLY RUNNING PMS VERSION
 RunVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
-RunVersion=$(grep -oP '^.+?(?=\-)'                          < <(printf '%s' "$RunVersion"))
+RunVersion=$(strip_build_version "$RunVersion")
 
 # SCRAPE PMS FOLDER LOCATION AND CREATE ARCHIVED PACKAGES DIR W/OLD FILE CLEANUP
 PlexFolder=$(readlink /var/packages/PlexMediaServer/shares/PlexMediaServer)
@@ -339,10 +340,12 @@ if [ -d "$PlexFolder/Updates" ]; then
     rmdir "$PlexFolder/Updates/"
   fi
 fi
-if [ -d "$SrceFolder/Archive/Packages" ]; then
-  find "$SrceFolder/Archive/Packages" -type f -name "PlexMediaServer*.spk" -mtime +"$OldUpdates" -delete
-else
-  mkdir -p "$SrceFolder/Archive/Packages"
+
+if [ -d "$PlexFolder/Updates" ]; then
+  mv -f "$PlexFolder/Updates/"* "$SrceFolder/Archive/Packages/" 2>/dev/null
+  if [ -n "$(find "$PlexFolder/Updates/" -prune -empty 2>/dev/null)" ]; then
+    rmdir "$PlexFolder/Updates/"
+  fi
 fi
 
 # SCRAPE PLEX ONLINE TOKEN
@@ -388,7 +391,7 @@ if [ "$Rollback" = "true" ]; then
   /usr/syno/bin/synopkg start   "PlexMediaServer"
   printf "%s\n" "----------------------------------------"
   NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
-  NowVersion=$(grep -oP '^.+?(?=\-)' < <(printf '%s' "$NowVersion"))
+  NowVersion=$(strip_build_version "$NowVersion")
   printf '%16s %s\n' "Rollback from:" "$RunVersion"
   printf '%16s %s'             "to:" "$NowVersion"
   if [ -n "$NowVersion" ]; then
@@ -412,6 +415,12 @@ else
     ChannelUrl="https://plex.tv/api/downloads/5.json"
   elif [ "$PlexChannl" -eq "8" ]; then
     # BETA SERVER UPDATE CHANNEL (REQUIRES PLEX PASS)
+    if [ -z "$PlexOToken" ]; then
+      printf ' %s\n' "Beta channel requires a Plex Online Token but none was found - exiting.."
+      /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update task failed. Beta channel selected but no Plex Online Token found."}'
+      printf "\n"
+      exit 1
+    fi
     ChannlName=Beta
     ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass&X-Plex-Token=$PlexOToken"
   else
@@ -424,15 +433,14 @@ else
 fi
 
 # SCRAPE PLEX WEBSITE FOR UPDATE INFO
-PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl")
-if [ "$?" -eq "0" ]; then
+if PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl"); then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   PlexTvJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$PlexTvHtml") | tr -d '\0')
   # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
   PlexTvJson=$'[\n'"$PlexTvJson"$'\n]'
  #PlexTvHtml=$(grep -oPz '\X*\{\W{0,6}\"'                   < <(printf '%s' "$PlexTvHtml")  | tr -d '\0' | sed -z 's/\W\[.*//')
   NewVerFull=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .version'      < <(printf '%s' "$PlexTvJson"))
-  NewVersion=$(grep -oP '^.+?(?=\-)'                                                                                                        < <(printf '%s' "$NewVerFull"))
+  NewVersion=$(strip_build_version "$NewVerFull")
   NewVerDate=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .release_date' < <(printf '%s' "$PlexTvJson"))
   NewVerAddd=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .items_added'  < <(printf '%s' "$PlexTvJson"))
   NewVerFixd=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .items_fixed'  < <(printf '%s' "$PlexTvJson"))
@@ -447,17 +455,16 @@ else
 fi
 
 # UPDATE LOCAL VERSION CHANGELOG
-grep -q           "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDate"))"    "$SrceFolder/Archive/Packages/changelog.txt" 2>/dev/null
-if [ "$?" -ne "0" ]; then
+if ! grep -q "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDate"))"    "$SrceFolder/Archive/Packages/changelog.txt" 2>/dev/null; then
   {
     printf "%s\n" "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDate"))"
     printf "%s\n" "$ChannlName Channel"
     printf "%s\n" ""
     printf "%s\n" "New Features:"
-    printf "%s\n" "$NewVerAddd" | awk '{ print "* " $BASH_SOURCE }'
-    printf "%s\n" ""
+    printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
+
     printf "%s\n" "Fixed Features:"
-    printf "%s\n" "$NewVerFixd" | awk '{ print "* " $BASH_SOURCE }'
+    printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
     printf "%s\n" ""
     printf "%s\n" "----------------------------------------"
     printf "%s\n" ""
@@ -486,7 +493,12 @@ else
 fi
 
 # COMPARE PLEX VERSIONS
-if /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
+if [ -z "$RunVersion" ]; then
+  printf '%17s%s\n' '' "* Plex Media Server is not installed or version could not be determined."
+  ExitStatus=1
+elif [ -z "$NewVersion" ]; then
+  printf '%17s%s\n' '' "* Online version could not be determined, skipping version comparison."
+elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
   printf '%17s%s\n' '' "* Newer version found!"
   printf "\n"
   printf '%16s %s\n'    "New Package:" "$NewPackage"
@@ -501,8 +513,7 @@ if /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     if [ -f "$SrceFolder/Archive/Packages/$NewPackage" ]; then
       printf "%s\n" "* Package already exists in local Archive"
     fi
-    /bin/wget -nv -c -nc -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl"                                      2>&1
-    if [ "$?" -eq "0" ]; then
+    if /bin/wget -nv -c -nc -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl" 2>&1; then
       printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
       /usr/syno/bin/synopkg stop    "PlexMediaServer"
       printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
@@ -542,17 +553,14 @@ if /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
         # SHOW NEW PLEX FEATURES
         printf "%s\n" "NEW FEATURES:"
         printf "%s\n" "----------------------------------------"
-        printf "%s\n" "$NewVerAddd" | awk '{ print "* " $BASH_SOURCE }'
+        printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
+
+        printf "%s\n" "FIXED FEATURES:"
+        printf "%s\n" "----------------------------------------"
+        printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
         printf "%s\n" "----------------------------------------"
       fi
       printf "\n"
-      if [ -n "$NewVerFixd" ]; then
-        # SHOW FIXED PLEX FEATURES
-        printf "%s\n" "FIXED FEATURES:"
-        printf "%s\n" "----------------------------------------"
-        printf "%s\n" "$NewVerFixd" | awk '{ print "* " $BASH_SOURCE }'
-        printf "%s\n" "----------------------------------------"
-      fi
       /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update task completed successfully"}'
       ExitStatus=1
     else
@@ -561,7 +569,7 @@ if /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
       ExitStatus=1
     fi
   else
-    printf ' %s\n' "Update newer than $MinimumAge days - skipping.."
+    printf ' %s\n' "Plex update is too new ($PackageAge days), requires $MinimumAge+ days - skipping.."
   fi
 else
   printf '%17s%s\n' '' "* No new version found."
