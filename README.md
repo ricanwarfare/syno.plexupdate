@@ -222,12 +222,12 @@ The script utilizes (4) default but user-configurable variables:
 # Command Line Options
 
 ```
-Usage: syno.plexupdate.sh [-a #] [-c p|b] [-m] [-r] [-b] [-h]
+Usage: syno.plexupdate.sh [-a #] [-c p|b] [-m] [-r] [-f] [-h]
   -a: Override the minimum age in days
   -c: Override the update channel (p for Public, b for Beta)
   -m: Update from the master branch (non-release version)
   -r: Rollback to previous installed version
-  -b: Skip minimum age check (install immediately)
+  -f: Force install - skip minimum age check
   -h: Display this help message
 ```
 
@@ -246,12 +246,12 @@ This will:
 4. Restart Plex Media Server
 5. Report success/failure via DSM notification
 
-### Skip Age Check
+### Force Install (Skip Age Check)
 
 To bypass the minimum age requirement and install immediately:
 
 ```bash
-bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -b
+bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -f
 ```
 
 # Known Non-Issues
@@ -265,18 +265,22 @@ bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -b
 
 **New Features:**
 - Added `-r` flag for rollback to previous installed version
-- Added `-b` flag to skip minimum age check
+- Added `-f` flag to force install (skip minimum age check)
 - Added concurrent execution protection via lock file (`/tmp/syno.plexupdate.lock`)
-- Added `set -euo pipefail` for stricter error handling
-- Token masking in logs (only last 4 characters visible)
+- Added `set -uo pipefail` for stricter error handling
+- Token masking variable for logs (only last 4 characters visible)
 
 **Improvements:**
 - Better handling of stale lock files (checks if PID is still running)
+- Rollback now verifies the installed version actually changed (not just that a version string exists)
+- Removed dead `cmp -s` call during script self-update
+- Fixed missing blank line in changelog output between New/Fixed features
 - Updated help text with new options
 - Added fork attribution in header
+- Added `.gitattributes` to enforce LF line endings for shell scripts
 
 **Security:**
-- Plex tokens are now masked in debug output
+- Plex token is now protected from leaking into `.debug` log via `set +x` around sensitive lines
 - Lock file prevents multiple simultaneous runs
 
 # Common Mistakes

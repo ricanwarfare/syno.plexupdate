@@ -122,7 +122,7 @@ fi
 
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
-while getopts ":a:c:mrbh" opt; do
+while getopts ":a:c:mrfh" opt; do
   case ${opt} in
     a) # AUTO-UPDATE SCRIPT AND PLEX
       # Check if the value is numerical only
@@ -155,17 +155,17 @@ while getopts ":a:c:mrbh" opt; do
     r) # ROLLBACK TO PREVIOUS VERSION
       Rollback=true
       ;;
-    b) # SKIP AGE CHECK (FORCE INSTALL)
+    f) # SKIP AGE CHECK (FORCE INSTALL)
       SkipAgeCheck=true
-      printf '%16s %s\n'           "Override:" "-b, Skipping minimum age check"
+      printf '%16s %s\n'           "Override:" "-f, Skipping minimum age check (force install)"
       ;;
     h) # HELP OPTION
-      printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-r] [-b] [-h]"
+      printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-r] [-f] [-h]"
       printf ' %s\n'   "-a: Override the minimum age in days"
       printf ' %s\n'   "-c: Override the update channel (p for Public, b for Beta)"
       printf ' %s\n'   "-m: Update from the master branch (non-release version)"
       printf ' %s\n'   "-r: Rollback to previous installed version"
-      printf ' %s\n'   "-b: Skip minimum age check (install immediately)"
+      printf ' %s\n'   "-f: Force install - skip minimum age check"
       printf ' %s\n\n' "-h: Display this help message"
       exit 0
       ;;
@@ -280,7 +280,6 @@ if [[ "$SpusNewVer" != "null" ]]; then
           # MOVE-OVERWRITE INSTEAD OF COPY-OVERWRITE TO NOT CORRUPT RUNNING IN-MEMORY VERSION OF SCRIPT
           mv -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/$SrceFileNm"                     2>&1
           printf "%s\n" "----------------------------------------"
-          cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"
           if cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"; then
             printf '%17s%s\n' '' "* Script update succeeded!"
             /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update completed successfully"}'
@@ -420,7 +419,7 @@ if [ "$Rollback" = "true" ]; then
   NowVersion=$(strip_build_version "$NowVersion")
   printf '%16s %s\n' "Rollback from:" "$RunVersion"
   printf '%16s %s'             "to:" "$NowVersion"
-  if [ -n "$NowVersion" ]; then
+  if [ -n "$NowVersion" ] && /usr/bin/dpkg --compare-versions "$RunVersion" gt "$NowVersion"; then
     printf ' %s\n' "succeeded!"
     /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback completed successfully"}'
   else
@@ -448,7 +447,10 @@ else
       exit 1
     fi
     ChannlName=Beta
+    # DISABLE XTRACE TEMPORARILY TO PREVENT TOKEN LEAK IN DEBUG LOG
+    { set +x; } 2>/dev/null
     ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass&X-Plex-Token=$PlexOToken"
+    set -x
   else
     # REPORT ERROR IF UNRECOGNIZED CHANNEL SELECTION
     printf ' %s\n' "Unable to identify Server Update Channel (Public, Beta, etc) - exiting.."
@@ -467,7 +469,12 @@ NewVerFixd=""
 NewDwnlUrl=""
 NewPackage=""
 PackageAge=""
-if PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl"); then
+# DISABLE XTRACE TEMPORARILY TO PREVENT TOKEN LEAK IN DEBUG LOG
+{ set +x; } 2>/dev/null
+PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl")
+_curl_rc=$?
+set -x
+if [ "$_curl_rc" -eq "0" ]; then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   PlexTvJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$PlexTvHtml") | tr -d '\0')
   # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
@@ -496,7 +503,7 @@ if ! grep -q "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDat
     printf "%s\n" ""
     printf "%s\n" "New Features:"
     printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
-
+    printf "%s\n" ""
     printf "%s\n" "Fixed Features:"
     printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
     printf "%s\n" ""

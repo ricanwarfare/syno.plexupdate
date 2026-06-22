@@ -1,0 +1,4 @@
+# Force LF line endings for shell scripts (these run on Linux/Synology)
+*.sh text eol=lf
+*.ini text eol=lf
+*.md text eol=lf
