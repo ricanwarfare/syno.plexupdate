@@ -124,11 +124,11 @@ fi
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mrfh" opt; do
   case ${opt} in
-    a) # AUTO-UPDATE SCRIPT AND PLEX
+    a) # SET MINIMUM AGE THRESHOLD (in days) for both script and Plex updates
       # Check if the value is numerical only
       if [[ $OPTARG =~ ^[0-9]+$ ]]; then
         MinimumAge=$OPTARG
-        printf '%16s %s\n'         "Override:" "-a, Minimum Age set to $MinimumAge days"
+        printf '%16s %s\n'         "Override:" "-a, Minimum age threshold set to $MinimumAge days"
       else
         printf '\n%16s %s\n\n'   "Bad Option:" "-a, requires a number value for minimum age in days"
         exit 1
@@ -155,18 +155,22 @@ while getopts ":a:c:mrfh" opt; do
     r) # ROLLBACK TO PREVIOUS VERSION
       Rollback=true
       ;;
-    f) # SKIP AGE CHECK (FORCE INSTALL)
+    f) # FORCE INSTALL - skip all age checks for both script and Plex updates
       SkipAgeCheck=true
-      printf '%16s %s\n'           "Override:" "-f, Skipping minimum age check (force install)"
+      printf '%16s %s\n'           "Override:" "-f, Force mode - skipping all minimum age checks"
       ;;
     h) # HELP OPTION
       printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-r] [-f] [-h]"
-      printf ' %s\n'   "-a: Override the minimum age in days"
-      printf ' %s\n'   "-c: Override the update channel (p for Public, b for Beta)"
-      printf ' %s\n'   "-m: Update from the master branch (non-release version)"
-      printf ' %s\n'   "-r: Rollback to previous installed version"
-      printf ' %s\n'   "-f: Force install - skip minimum age check"
-      printf ' %s\n\n' "-h: Display this help message"
+      printf ' %s\n'   "-a #  Set the minimum age threshold (in days) a release must meet before"
+      printf ' %s\n'   "      installing. Applies to both script self-updates and Plex updates."
+      printf ' %s\n'   "      (e.g. -a 14 to require 14+ days, -a 0 to allow any age)"
+      printf ' %s\n'   "-c    Override the update channel (p for Public, b for Beta)"
+      printf ' %s\n'   "-m    Update from the master branch (non-release version)"
+      printf ' %s\n'   "-r    Rollback to previous installed version"
+      printf ' %s\n'   "-f    Force mode - skip ALL minimum age checks entirely for both script"
+      printf ' %s\n'   "      self-updates and Plex updates. Unlike -a, this does not change the"
+      printf ' %s\n'   "      threshold; it bypasses age verification altogether."
+      printf ' %s\n\n' "-h    Display this help message"
       exit 0
       ;;
     \?) # INVALID OPTION
@@ -270,7 +274,7 @@ if [[ "$SpusNewVer" != "null" ]]; then
     fi
     # DOWNLOAD AND INSTALL THE SCRIPT UPDATE
     if [ "$SelfUpdate" -eq "1" ]; then
-      if [ "$SpusRelAge" -ge "$MinimumAge" ] || [ "$MasterUpdt" = "true" ]; then
+      if [ "$SpusRelAge" -ge "$MinimumAge" ] || [ "$MasterUpdt" = "true" ] || [ "$SkipAgeCheck" = "true" ]; then
         printf "\n"
         printf "%s\n" "INSTALLING NEW SCRIPT:"
         printf "%s\n" "----------------------------------------"
