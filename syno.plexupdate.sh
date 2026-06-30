@@ -161,16 +161,12 @@ while getopts ":a:c:mrfh" opt; do
       ;;
     h) # HELP OPTION
       printf '\n%s\n\n'  "Usage: $SrceFileNm [-a #] [-c p|b] [-m] [-r] [-f] [-h]"
-      printf ' %s\n'   "-a #  Set the minimum age threshold (in days) a release must meet before"
-      printf ' %s\n'   "      installing. Applies to both script self-updates and Plex updates."
-      printf ' %s\n'   "      (e.g. -a 14 to require 14+ days, -a 0 to allow any age)"
-      printf ' %s\n'   "-c    Override the update channel (p for Public, b for Beta)"
-      printf ' %s\n'   "-m    Update from the master branch (non-release version)"
-      printf ' %s\n'   "-r    Rollback to previous installed version"
-      printf ' %s\n'   "-f    Force mode - skip ALL minimum age checks entirely for both script"
-      printf ' %s\n'   "      self-updates and Plex updates. Unlike -a, this does not change the"
-      printf ' %s\n'   "      threshold; it bypasses age verification altogether."
-      printf ' %s\n\n' "-h    Display this help message"
+      printf ' %s\n'   "-a #: Set minimum age threshold in days (e.g. -a 14 for stricter, -a 0 for lenient)"
+      printf ' %s\n'   "-c:   Override the update channel (p for Public, b for Beta)"
+      printf ' %s\n'   "-m:   Update script from the master branch (non-release version)"
+      printf ' %s\n'   "-r:   Rollback Plex to the previous installed version"
+      printf ' %s\n'   "-f:   Force mode - bypass all minimum age checks for script and Plex updates"
+      printf ' %s\n\n' "-h:   Display this help message"
       exit 0
       ;;
     \?) # INVALID OPTION
@@ -283,6 +279,7 @@ if [[ "$SpusNewVer" != "null" ]]; then
           cp -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" 2>&1
           # MOVE-OVERWRITE INSTEAD OF COPY-OVERWRITE TO NOT CORRUPT RUNNING IN-MEMORY VERSION OF SCRIPT
           mv -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/$SrceFileNm"                     2>&1
+          chmod +x "$SrceFolder/$SrceFileNm"
           printf "%s\n" "----------------------------------------"
           if cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"; then
             printf '%17s%s\n' '' "* Script update succeeded!"
