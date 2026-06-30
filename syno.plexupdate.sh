@@ -41,7 +41,7 @@ trap 'rm -f "$LOCKFILE"' EXIT
 echo $$ > "$LOCKFILE"
 
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.0
+readonly SpuscrpVer=4.8.1
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
