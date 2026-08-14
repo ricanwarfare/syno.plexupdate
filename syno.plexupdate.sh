@@ -29,7 +29,7 @@ set -x
 LOCKFILE="/tmp/syno.plexupdate.lock"
 if [ -f "$LOCKFILE" ]; then
   LockPid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
-  if kill -0 "$LockPid" 2>/dev/null; then
+  if [ -n "$LockPid" ] && [ "$LockPid" != "unknown" ] && kill -0 "$LockPid" 2>/dev/null; then
     printf ' %s\n\n' "* Another instance is already running (PID: $LockPid) - exiting.."
     exit 1
   else
@@ -38,10 +38,17 @@ if [ -f "$LOCKFILE" ]; then
   fi
 fi
 trap 'rm -f "$LOCKFILE"' EXIT
-echo $$ > "$LOCKFILE"
+if ! (set -o noclobber; echo $$ > "$LOCKFILE") 2>/dev/null; then
+  LockPid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
+  if [ -n "$LockPid" ] && [ "$LockPid" != "unknown" ] && kill -0 "$LockPid" 2>/dev/null; then
+    printf ' %s\n\n' "* Another instance is already running (PID: $LockPid) - exiting.."
+    exit 1
+  fi
+  echo $$ > "$LOCKFILE"
+fi
 
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.1
+readonly SpuscrpVer=4.8.2
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
@@ -50,7 +57,7 @@ printf "\n"
 
 # HELPER: STRIP BUILD NUMBER FROM VERSION STRING (e.g. "1.32.0.6918-1234567" -> "1.32.0.6918")
 strip_build_version() {
-  grep -oP '^.+?(?=\-)' < <(printf '%s' "$1")
+  printf '%s' "${1%%-*}"
 }
 
 # CHECK IF ROOT
@@ -84,6 +91,7 @@ create_or_update_config() {
   add_config_with_comment "OldUpdates" "60"  "# PREVIOUSLY DOWNLOADED PACKAGES DELETED IF OLDER THAN THIS MANY DAYS"
   add_config_with_comment "NetTimeout" "900" "# NETWORK TIMEOUT IN SECONDS (900s = 15m)"
   add_config_with_comment "SelfUpdate" "0"   "# SCRIPT WILL SELF-UPDATE IF SET TO 1"
+  add_config_with_comment "SkipAgeCheck" "0" "# BYPASS ALL MINIMUM AGE CHECKS IF SET TO 1"
 }
 create_or_update_config "$SrceFolder/config.ini"
 
@@ -97,10 +105,15 @@ MinimumAge="${MinimumAge:-7}"
 OldUpdates="${OldUpdates:-60}"
 NetTimeout="${NetTimeout:-900}"
 SelfUpdate="${SelfUpdate:-0}"
+SkipAgeCheck="${SkipAgeCheck:-0}"
+if [ "$SkipAgeCheck" = "1" ] || [ "$SkipAgeCheck" = "true" ]; then
+  SkipAgeCheck=true
+else
+  SkipAgeCheck=false
+fi
 
 MasterUpdt=false
 Rollback=false
-SkipAgeCheck=false
 UpdtChannl=""
 ExitStatus=""
 
@@ -119,7 +132,6 @@ else
   printf '\n %s\n\n' "* Internet appears to be down - exiting.."
   exit 1
 fi
-
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mrfh" opt; do
@@ -207,42 +219,47 @@ SpusRelAge=""
 SpusDwnUrl=""
 SpusRelDes=""
 SpusHlpUrl=""
-if GitHubHtml=$(curl -i -m "$NetTimeout" -Ls https://api.github.com/repos/$GitHubRepo/releases?per_page=1); then
-  # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
-  GitHubJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$GitHubHtml") | tr -d '\0')
-  # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
-  GitHubJson=$'[\n'"$GitHubJson"$'\n]'
-  GitHubHtml=$(grep -oPz '\X*\{\W{0,6}\"'                   < <(printf '%s' "$GitHubHtml")  | tr -d '\0' | sed -z 's/\W\[.*//')
-  # SCRAPE CURRENT RATE LIMIT
-  SpusApiRlm=$(grep -oP '^x-ratelimit-limit: \K[\d]+'       < <(printf '%s' "$GitHubHtml"))
-  SpusApiRlr=$(grep -oP '^x-ratelimit-remaining: \K[\d]+'   < <(printf '%s' "$GitHubHtml"))
-  #if [[ -n "$SpusApiRlm" && -n "$SpusApiRlr" ]]; then
-  #  SpusApiRla=$((SpusApiRlm - SpusApiRlr))
-  #fi
-  # SCRAPE API MESSAGES
-  SpusApiMsg=$(jq -r '.[].message'                          < <(printf '%s' "$GitHubJson"))
-  SpusApiDoc=$(jq -r '.[].documentation_url'                < <(printf '%s' "$GitHubJson"))
-  # SCRAPE EXPECTED RELEASE-RELATED INFO
-  SpusNewVer=$(jq -r '.[].tag_name'                         < <(printf '%s' "$GitHubJson"))
-  SpusNewVer=${SpusNewVer#v}
-  if [ "$SpusNewVer" != "null" ] && [ -n "$SpusNewVer" ]; then
-    SpusRlDate=$(jq -r '.[].published_at'                     < <(printf '%s' "$GitHubJson"))
-    SpusRlDate=$(date --date "$SpusRlDate" +'%s')
+SpusHeaders="/tmp/syno.plexupdate.gh_headers.$$"
+
+if GitHubJson=$(curl -s -m "$NetTimeout" -D "$SpusHeaders" -L "https://api.github.com/repos/$GitHubRepo/releases?per_page=1"); then
+  SpusApiRlm=$(grep -i '^x-ratelimit-limit:' "$SpusHeaders" 2>/dev/null | tr -d '\r' | awk '{print $2}')
+  SpusApiRlr=$(grep -i '^x-ratelimit-remaining:' "$SpusHeaders" 2>/dev/null | tr -d '\r' | awk '{print $2}')
+  rm -f "$SpusHeaders"
+
+  eval "$(jq -r '
+    if type == "array" and length > 0 then
+      .[0] | (
+        "SpusNewVer=" + ((.tag_name // "") | sub("^v"; "") | @sh) + "\n" +
+        "SpusRlDate_Raw=" + ((.published_at // "") | @sh) + "\n" +
+        "SpusRelDes=" + ((.body // "") | @sh)
+      )
+    elif type == "object" then
+      "SpusApiMsg=" + ((.message // "") | @sh) + "\n" +
+      "SpusApiDoc=" + ((.documentation_url // "") | @sh)
+    else
+      ""
+    end
+  ' <<< "$GitHubJson" 2>/dev/null)"
+
+  if [ -n "${SpusNewVer:-}" ] && [ "$SpusNewVer" != "null" ]; then
+    SpusRlDate=$(date --date "$SpusRlDate_Raw" +'%s' 2>/dev/null || echo "0")
     SpusRelAge=$(((TodaysDate-SpusRlDate)/86400))
     if [ "$MasterUpdt" = "true" ]; then
       SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/master/syno.plexupdate.sh
       SpusRelDes=$'* Check GitHub for master branch commit messages and extended descriptions'
     else
       SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/v$SpusNewVer/syno.plexupdate.sh
-      SpusRelDes=$(jq -r '.[].body'                             < <(printf '%s' "$GitHubJson"))
     fi
     SpusHlpUrl=https://github.com/$GitHubRepo/issues
   else
     SpusNewVer=""
-    printf ' %s\n\n' "* NO RELEASES FOUND ON GITHUB REPO.."
+    if [ -z "${SpusApiMsg:-}" ]; then
+      printf ' %s\n\n' "* NO RELEASES FOUND ON GITHUB REPO.."
+    fi
     ExitStatus=1
   fi
 else
+  rm -f "$SpusHeaders"
   printf ' %s\n\n' "* UNABLE TO CHECK FOR LATEST VERSION OF SCRIPT.."
   ExitStatus=1
 fi
@@ -250,18 +267,18 @@ fi
 # PRINT SCRIPT STATUS/DEBUG INFO
 printf '%16s %s\n'      "Running Ver:" "$SpuscrpVer"
 
-if [ "$SpusNewVer" = "null" ]; then
+if [ -n "${SpusApiMsg:-}" ]; then
   printf "%16s %s\n" "GitHub API Msg:" "$(fold -w 72 -s     < <(printf '%s' "$SpusApiMsg") | sed '2,$s/^/                 /')"
-  printf "%16s %s\n" "GitHub API Lmt:" "$SpusApiRlm connections per hour per IP"
+  printf "%16s %s\n" "GitHub API Lmt:" "${SpusApiRlm:-0} connections per hour per IP"
   printf "%16s %s\n" "GitHub API Doc:" "$(fold -w 72 -s     < <(printf '%s' "$SpusApiDoc") | sed '2,$s/^/                 /')"
   ExitStatus=1
 elif [ "$SpusNewVer" != "" ]; then
-  printf '%16s %s\n'     "Online Ver:" "$SpusNewVer (attempts left $SpusApiRlr/$SpusApiRlm)"
-  printf '%16s %s\n'       "Released:" "$(date --rfc-3339 seconds --date @"$SpusRlDate") ($SpusRelAge+ days old)"
+  printf '%16s %s\n'     "Online Ver:" "$SpusNewVer (attempts left ${SpusApiRlr:-0}/${SpusApiRlm:-0})"
+  printf '%16s %s\n'       "Released:" "$(date --rfc-3339 seconds --date @"$SpusRlDate" 2>/dev/null || echo "$SpusRlDate") ($SpusRelAge+ days old)"
 fi
 
 # COMPARE SCRIPT VERSIONS
-if [[ "$SpusNewVer" != "null" ]]; then
+if [[ -n "$SpusNewVer" && "$SpusNewVer" != "null" ]]; then
   if /usr/bin/dpkg --compare-versions "$SpusNewVer" gt "$SpuscrpVer" || [[ "$MasterUpdt" == "true" ]]; then
     if [[ "$MasterUpdt" == "true" ]]; then
       printf '%17s%s\n' '' "* Updating from master branch!"
@@ -318,7 +335,11 @@ fi
 printf "\n"
 
 # SCRAPE SYNOLOGY HARDWARE MODEL
-SynoHModel=$(< /proc/sys/kernel/syno_hw_version)
+if [ -f /proc/sys/kernel/syno_hw_version ]; then
+  SynoHModel=$(< /proc/sys/kernel/syno_hw_version)
+else
+  SynoHModel="Synology NAS"
+fi
 # SCRAPE SYNOLOGY CPU ARCHITECTURE FAMILY
 ArchFamily=$(uname --machine)
 
@@ -327,12 +348,16 @@ ArchFamily=$(uname --machine)
 [ "$ArchFamily" = "armv7l" ] && ArchFamily=armv7neon
 
 # SCRAPE DSM VERSION AND CHECK COMPATIBILITY
-DSMVersion=$(grep -i "productversion=" "/etc.defaults/VERSION" | cut -d"\"" -f 2)
+DSMVersion=$(grep -i "productversion=" "/etc.defaults/VERSION" 2>/dev/null | cut -d"\"" -f 2)
+if [ -z "$DSMVersion" ]; then
+  DSMVersion="7.0"
+fi
+
 if /usr/bin/dpkg   --compare-versions "$DSMVersion" "ge" "5.2"   && /usr/bin/dpkg --compare-versions "$DSMVersion" "lt" "7"; then
   DSMplexNID="synology"
 elif /usr/bin/dpkg --compare-versions "$DSMVersion" "ge" "7"     && /usr/bin/dpkg --compare-versions "$DSMVersion" "lt" "7.2.2"; then
   DSMplexNID="synology-dsm7"
-elif /usr/bin/dpkg --compare-versions "$DSMVersion" "ge" "7.2.2" && /usr/bin/dpkg --compare-versions "$DSMVersion" "lt" "8"; then
+elif /usr/bin/dpkg --compare-versions "$DSMVersion" "ge" "7.2.2"; then
   DSMplexNID="synology-dsm72"
 else
   printf ' %s\n' "* Unsupported DSM version: $DSMVersion - exiting.."
@@ -348,18 +373,18 @@ if /usr/bin/dpkg --compare-versions "$MinDSMVers" gt "$DSMVersion"; then
   printf "\n"
   exit 1
 fi
-DSMVersion=$(grep -i "buildnumber="    "/etc.defaults/VERSION" | cut -d'"' -f 2 | { read -r build; printf '%s-%s' "$DSMVersion" "$build"; })
-DSMUpdateV=$(grep -i "smallfixnumber=" "/etc.defaults/VERSION" | cut -d'"' -f 2)
+DSMVersion=$(grep -i "buildnumber="    "/etc.defaults/VERSION" 2>/dev/null | cut -d'"' -f 2 | { read -r build; [ -n "$build" ] && printf '%s-%s' "$DSMVersion" "$build" || printf '%s' "$DSMVersion"; })
+DSMUpdateV=$(grep -i "smallfixnumber=" "/etc.defaults/VERSION" 2>/dev/null | cut -d'"' -f 2)
 if [ -n "$DSMUpdateV" ]; then
   DSMVersion="$DSMVersion Update $DSMUpdateV"
 fi
 
 # SCRAPE CURRENTLY RUNNING PMS VERSION
-RunVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
+RunVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer" 2>/dev/null || echo "")
 RunVersion=$(strip_build_version "$RunVersion")
 
 # SCRAPE PMS FOLDER LOCATION AND CREATE ARCHIVED PACKAGES DIR W/OLD FILE CLEANUP
-PlexFolder=$(readlink /var/packages/PlexMediaServer/shares/PlexMediaServer)
+PlexFolder=$(readlink /var/packages/PlexMediaServer/shares/PlexMediaServer 2>/dev/null || echo "")
 PlexFolder="$PlexFolder/AppData/Plex Media Server"
 mkdir -p "$SrceFolder/Archive/Packages"
 
@@ -375,11 +400,15 @@ if [ -d "$SrceFolder/Archive/Packages" ]; then
 fi
 
 # SCRAPE PLEX ONLINE TOKEN
-PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml")
+PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
 # CREATE MASKED TOKEN VERSION FOR LOGGING (SECURITY)
-PlexOTokenMasked="****${PlexOToken: -4}"
+if [ -n "$PlexOToken" ]; then
+  PlexOTokenMasked="****${PlexOToken: -4}"
+else
+  PlexOTokenMasked=""
+fi
 # SCRAPE PLEX SERVER UPDATE CHANNEL
-PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml")
+PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
 [ -n "$UpdtChannl" ] && PlexChannl="$UpdtChannl" # Override with command line option
 
 # ROLLBACK FUNCTIONALITY
@@ -387,11 +416,22 @@ if [ "$Rollback" = "true" ]; then
   printf "\n%s\n" "ROLLBACK TO PREVIOUS VERSION:"
   printf "%s\n" "----------------------------------------"
   # Find the previous package (second most recent)
-  PreviousPkg=$(ls -t "$SrceFolder/Archive/Packages/PlexMediaServer"*.spk 2>/dev/null | head -2 | tail -1)
-  if [ -z "$PreviousPkg" ]; then
-    printf ' %s\n' "* No previous package found in Archive - cannot rollback"
+  PkgList=()
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] && PkgList+=("$pkg")
+  done < <(ls -t "$SrceFolder/Archive/Packages/PlexMediaServer"*.spk 2>/dev/null)
+  if [ "${#PkgList[@]}" -lt 2 ]; then
+    printf ' %s\n' "* No previous package found in Archive (found ${#PkgList[@]} package(s)) - cannot rollback"
     printf "%s\n" "----------------------------------------"
     /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed. No previous package found."}'
+    exit 1
+  fi
+  PreviousPkg="${PkgList[1]}"
+  # Verify archive integrity before stopping Plex
+  if ! tar -tf "$PreviousPkg" >/dev/null 2>&1; then
+    printf ' %s\n' "* Previous package archive is corrupt or unreadable - cannot rollback"
+    printf "%s\n" "----------------------------------------"
+    /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed. Previous package corrupted."}'
     exit 1
   fi
   printf '%16s %s\n' "Previous Package:" "$(basename "$PreviousPkg")"
@@ -416,7 +456,7 @@ if [ "$Rollback" = "true" ]; then
   printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
   /usr/syno/bin/synopkg start   "PlexMediaServer"
   printf "%s\n" "----------------------------------------"
-  NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
+  NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer" 2>/dev/null || echo "")
   NowVersion=$(strip_build_version "$NowVersion")
   printf '%16s %s\n' "Rollback from:" "$RunVersion"
   printf '%16s %s'             "to:" "$NowVersion"
@@ -448,10 +488,7 @@ else
       exit 1
     fi
     ChannlName=Beta
-    # DISABLE XTRACE TEMPORARILY TO PREVENT TOKEN LEAK IN DEBUG LOG
-    { set +x; } 2>/dev/null
-    ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass&X-Plex-Token=$PlexOToken"
-    set -x
+    ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass"
   else
     # REPORT ERROR IF UNRECOGNIZED CHANNEL SELECTION
     printf ' %s\n' "Unable to identify Server Update Channel (Public, Beta, etc) - exiting.."
@@ -472,55 +509,41 @@ NewPackage=""
 PackageAge=""
 # DISABLE XTRACE TEMPORARILY TO PREVENT TOKEN LEAK IN DEBUG LOG
 { set +x; } 2>/dev/null
-PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl")
+if [ -n "$PlexOToken" ]; then
+  PlexTvJson=$(curl -s -m "$NetTimeout" -L -H "X-Plex-Token: $PlexOToken" "$ChannelUrl")
+else
+  PlexTvJson=$(curl -s -m "$NetTimeout" -L "$ChannelUrl")
+fi
 _curl_rc=$?
 set -x
-if [ "$_curl_rc" -eq "0" ]; then
-  # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
-  PlexTvJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$PlexTvHtml") | tr -d '\0')
-  # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
-  PlexTvJson=$'[\n'"$PlexTvJson"$'\n]'
- #PlexTvHtml=$(grep -oPz '\X*\{\W{0,6}\"'                   < <(printf '%s' "$PlexTvHtml")  | tr -d '\0' | sed -z 's/\W\[.*//')
-  NewVerFull=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .version'      < <(printf '%s' "$PlexTvJson"))
+
+if [ "$_curl_rc" -eq "0" ] && [ -n "$PlexTvJson" ]; then
+  eval "$(jq --arg DSMplexNID "$DSMplexNID" --arg ArchFamily "$ArchFamily" -r '
+    (.nas[$DSMplexNID] // (.nas[]? | select(.id == $DSMplexNID))) as $target |
+    if $target then
+      "NewVerFull=" + (($target.version // "") | @sh) + "\n" +
+      "NewVerDate=" + (($target.release_date // "") | tostring | @sh) + "\n" +
+      "NewVerAddd=" + (($target.items_added // "") | @sh) + "\n" +
+      "NewVerFixd=" + (($target.items_fixed // "") | @sh) + "\n" +
+      "NewDwnlUrl=" + (($target.releases[]? | select(.build == ("linux-" + $ArchFamily)) | .url // "") | @sh)
+    else
+      ""
+    end
+  ' <<< "$PlexTvJson" 2>/dev/null)"
+
   NewVersion=$(strip_build_version "$NewVerFull")
-  NewVerDate=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .release_date' < <(printf '%s' "$PlexTvJson"))
-  NewVerAddd=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .items_added'  < <(printf '%s' "$PlexTvJson"))
-  NewVerFixd=$(jq --arg DSMplexNID "$DSMplexNID"                                -r '.[].nas[] | select(.id == $DSMplexNID) | .items_fixed'  < <(printf '%s' "$PlexTvJson"))
-  NewDwnlUrl=$(jq --arg DSMplexNID "$DSMplexNID" --arg ArchFamily "$ArchFamily" -r '.[].nas[] | select(.id == $DSMplexNID) | .releases[] | select(.build == "linux-"+$ArchFamily) | .url' < <(printf '%s' "$PlexTvJson"))
   NewPackage="${NewDwnlUrl##*/}"
   # CALCULATE NEW PACKAGE AGE FROM RELEASE DATE
-  PackageAge=$(((TodaysDate-NewVerDate)/86400))
+  if [ -n "$NewVerDate" ] && [ "$NewVerDate" -gt 0 ] 2>/dev/null; then
+    PackageAge=$(((TodaysDate-NewVerDate)/86400))
+  else
+    PackageAge="0"
+  fi
 else
   printf ' %s\n' "* UNABLE TO CHECK FOR LATEST VERSION OF PLEX MEDIA SERVER.."
   printf "\n"
   ExitStatus=1
 fi
-
-# UPDATE LOCAL VERSION CHANGELOG
-if ! grep -q "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDate"))"    "$SrceFolder/Archive/Packages/changelog.txt" 2>/dev/null; then
-  {
-    printf "%s\n" "Version $NewVersion ($(date --rfc-3339 seconds --date @"$NewVerDate"))"
-    printf "%s\n" "$ChannlName Channel"
-    printf "%s\n" ""
-    printf "%s\n" "New Features:"
-    printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
-    printf "%s\n" ""
-    printf "%s\n" "Fixed Features:"
-    printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
-    printf "%s\n" ""
-    printf "%s\n" "----------------------------------------"
-    printf "%s\n" ""
-  } >> "$SrceFolder/Archive/Packages/changelog.new"
-  if [ -f "$SrceFolder/Archive/Packages/changelog.new" ]; then
-    if [ -f "$SrceFolder/Archive/Packages/changelog.txt" ]; then
-      mv    "$SrceFolder/Archive/Packages/changelog.txt" "$SrceFolder/Archive/Packages/changelog.tmp"
-      cat   "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.tmp" > "$SrceFolder/Archive/Packages/changelog.txt"
-    else
-      mv    "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.txt"    
-    fi
-  fi
-fi
-rm "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.tmp" 2>/dev/null
 
 # PRINT PLEX STATUS/DEBUG INFO
 printf '%16s %s\n'         "Synology:" "$SynoHModel ($ArchFamily), DSM $DSMVersion"
@@ -528,7 +551,7 @@ printf '%16s %s\n'         "Plex Dir:" "$(fold -w 72 -s     < <(printf '%s' "$Pl
 printf '%16s %s\n'      "Running Ver:" "$RunVersion"
 if [ "$NewVersion" != "" ]; then
   printf '%16s %s\n'     "Online Ver:" "$NewVersion ($ChannlName Channel for $DSMplexNID)"
-  printf '%16s %s\n'       "Released:" "$(date --rfc-3339 seconds --date @"$NewVerDate") ($PackageAge+ days old)"
+  printf '%16s %s\n'       "Released:" "$(date --rfc-3339 seconds --date @"$NewVerDate" 2>/dev/null || echo "$NewVerDate") ($PackageAge+ days old)"
 else
   printf '%16s %s\n'     "Online Ver:" "Nonexistent ($ChannlName Channel for $DSMplexNID)"
   ExitStatus=1
@@ -552,38 +575,44 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     printf "%s\n" "INSTALLING NEW PACKAGE:"
     printf "%s\n" "----------------------------------------"
     printf "%s\n" "Downloading PlexMediaServer package:"
-    if [ -f "$SrceFolder/Archive/Packages/$NewPackage" ]; then
-      printf "%s\n" "* Package already exists in local Archive"
+    PackagePath="$SrceFolder/Archive/Packages/$NewPackage"
+    AlreadyDownloaded=false
+    if [ -f "$PackagePath" ] && tar -tf "$PackagePath" >/dev/null 2>&1; then
+      printf "%s\n" "* Package already exists and is valid in local Archive"
+      AlreadyDownloaded=true
     fi
-    if /bin/wget -nv -c -nc -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl" 2>&1; then
-      printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
-      /usr/syno/bin/synopkg stop    "PlexMediaServer"
-      printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
-      # INSTALL WHILE STRIPPING OUTPUT ANNOYANCES 
-     #/usr/syno/bin/synopkg install "$SrceFolder/Archive/Packages/$NewPackage" | awk '{gsub("<[^>]*>", "")}1' | awk '{gsub(/\\nNote:.*?\\n",/, RS)}1'
-     #/usr/syno/bin/synopkg install "$SrceFolder/Archive/Packages/$NewPackage" | jq -r '.results[].scripts?[]?.message? // empty | gsub("<[^>]*>"; "") | sub("Note:.*"; "") | sub("[[:space:]]+$"; "")'
-      /usr/syno/bin/synopkg install "$SrceFolder/Archive/Packages/$NewPackage" | \
-        jq -c '.results[] |= (
-          if (.scripts // empty) | type == "array" then
-            .scripts |= map(
-              if .message then
-                .message |= (
-                  gsub("<[^>]*>"; "")     # Strip HTML
-                  | split("\n")[0]        # Keep only the first real line
-                )
-              else . end
-            )
-          else .
-          end
-        )'
-      printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
-      /usr/syno/bin/synopkg start   "PlexMediaServer"
+
+    if [ "$AlreadyDownloaded" = "true" ] || /bin/wget -nv -c -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl" 2>&1; then
+      if tar -tf "$PackagePath" >/dev/null 2>&1; then
+        printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
+        /usr/syno/bin/synopkg stop    "PlexMediaServer"
+        printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
+        /usr/syno/bin/synopkg install "$PackagePath" | \
+          jq -c '.results[] |= (
+            if (.scripts // empty) | type == "array" then
+              .scripts |= map(
+                if .message then
+                  .message |= (
+                    gsub("<[^>]*>"; "")     # Strip HTML
+                    | split("\n")[0]        # Keep only the first real line
+                  )
+                else . end
+              )
+            else .
+            end
+          )'
+        printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
+        /usr/syno/bin/synopkg start   "PlexMediaServer"
+      else
+        printf '\n %s\n' "* Downloaded package archive is corrupt or incomplete, skipping install.."
+      fi
     else
       printf '\n %s\n' "* Package download failed, skipping install.."
     fi
     printf "%s\n" "----------------------------------------"
     printf "\n"
-    NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer")
+    NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer" 2>/dev/null || echo "")
+    NowVersion=$(strip_build_version "$NowVersion")
     printf '%16s %s\n'  "Update from:" "$RunVersion"
     printf '%16s %s'             "to:" "$NewVersion"
 
@@ -591,6 +620,37 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     if /usr/bin/dpkg --compare-versions "$NowVersion" gt "$RunVersion"; then
       printf ' %s\n' "succeeded!"
       printf "\n"
+      # UPDATE LOCAL VERSION CHANGELOG ONLY ON SUCCESSFUL INSTALL
+      if [ -n "$NewVerDate" ] && [ "$NewVerDate" -gt 0 ] 2>/dev/null; then
+        FormattedRelDate=$(date --rfc-3339 seconds --date @"$NewVerDate" 2>/dev/null || echo "Unknown Date")
+      else
+        FormattedRelDate="Unknown Date"
+      fi
+      if ! grep -q "Version $NewVersion ($FormattedRelDate)" "$SrceFolder/Archive/Packages/changelog.txt" 2>/dev/null; then
+        {
+          printf "%s\n" "Version $NewVersion ($FormattedRelDate)"
+          printf "%s\n" "$ChannlName Channel"
+          printf "%s\n" ""
+          printf "%s\n" "New Features:"
+          printf "%s\n" "$NewVerAddd" | awk '{ print "* " $0 }'
+          printf "%s\n" ""
+          printf "%s\n" "Fixed Features:"
+          printf "%s\n" "$NewVerFixd" | awk '{ print "* " $0 }'
+          printf "%s\n" ""
+          printf "%s\n" "----------------------------------------"
+          printf "%s\n" ""
+        } >> "$SrceFolder/Archive/Packages/changelog.new"
+        if [ -f "$SrceFolder/Archive/Packages/changelog.new" ]; then
+          if [ -f "$SrceFolder/Archive/Packages/changelog.txt" ]; then
+            mv    "$SrceFolder/Archive/Packages/changelog.txt" "$SrceFolder/Archive/Packages/changelog.tmp"
+            cat   "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.tmp" > "$SrceFolder/Archive/Packages/changelog.txt"
+          else
+            mv    "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.txt"
+          fi
+        fi
+      fi
+      rm -f "$SrceFolder/Archive/Packages/changelog.new" "$SrceFolder/Archive/Packages/changelog.tmp" 2>/dev/null
+
       if [ -n "$NewVerAddd" ]; then
         # SHOW NEW PLEX FEATURES
         printf "%s\n" "NEW FEATURES:"
