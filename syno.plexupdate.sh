@@ -401,12 +401,6 @@ fi
 
 # SCRAPE PLEX ONLINE TOKEN
 PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
-# CREATE MASKED TOKEN VERSION FOR LOGGING (SECURITY)
-if [ -n "$PlexOToken" ]; then
-  PlexOTokenMasked="****${PlexOToken: -4}"
-else
-  PlexOTokenMasked=""
-fi
 # SCRAPE PLEX SERVER UPDATE CHANNEL
 PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
 [ -n "$UpdtChannl" ] && PlexChannl="$UpdtChannl" # Override with command line option
