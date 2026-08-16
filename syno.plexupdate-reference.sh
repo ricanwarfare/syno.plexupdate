@@ -336,7 +336,7 @@ else
   elif [ "$PlexChannl" -eq "8" ]; then
     # BETA SERVER UPDATE CHANNEL (REQUIRES PLEX PASS)
     ChannlName=Beta
-    ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass&X-Plex-Token=$PlexOToken"
+    ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass"
   else
     # REPORT ERROR IF UNRECOGNIZED CHANNEL SELECTION
     printf ' %s\n' "Unable to identify Server Update Channel (Public, Beta, etc) - exiting.."
@@ -347,8 +347,16 @@ else
 fi
 
 # SCRAPE PLEX WEBSITE FOR UPDATE INFO
-PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl")
-if [ "$?" -eq "0" ]; then
+# DISABLE XTRACE TEMPORARILY TO PREVENT TOKEN LEAK IN DEBUG LOG
+{ set +x; } 2>/dev/null
+if [ -n "$PlexOToken" ]; then
+  PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls -H "X-Plex-Token: $PlexOToken" "$ChannelUrl")
+else
+  PlexTvHtml=$(curl -i -m "$NetTimeout" -Ls "$ChannelUrl")
+fi
+_curl_rc=$?
+set -x
+if [ "$_curl_rc" -eq "0" ]; then
   # AVOID SCRAPING SQUARED BRACKETS BECAUSE GITHUB IS INCONSISTENT
   PlexTvJson=$(grep -oPz '\{\s{0,6}\"\X*\s{0,4}\}'          < <(printf '%s' "$PlexTvHtml") | tr -d '\0')
   # ADD SQUARED BRACKETS BECAUSE ITS PROPER AND JQ NEEDS IT
