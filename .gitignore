@@ -1,2 +1,5 @@
 /config.ini
 /Archive/
+
+__pycache__/
+*.pyc

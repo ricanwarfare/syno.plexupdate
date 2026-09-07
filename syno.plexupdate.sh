@@ -18,37 +18,26 @@ SrceFllPth=$(readlink -f "${BASH_SOURCE[0]}")
 SrceFolder=$(dirname "$SrceFllPth")
 SrceFileNm=${SrceFllPth##*/}
 
-# REDIRECT STDOUT TO TEE IN ORDER TO DUPLICATE THE OUTPUT TO THE TERMINAL AS WELL AS A .LOG FILE
-exec > >(tee "$SrceFllPth.log") 2>"$SrceFllPth.debug"
+# ACQUIRE AN ATOMIC LOCK BEFORE OPENING (AND TRUNCATING) LOG FILES.
+# Never remove another process's lock, including when acquisition fails.
+umask 077
+LOCKDIR="/tmp/syno.plexupdate.lock.d"
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+  printf ' %s\n' "* Another instance may be running. If no updater is running, remove $LOCKDIR and retry."
+  exit 1
+fi
+trap 'rmdir "$LOCKDIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# ENABLE STRICT ERROR HANDLING AND XTRACE FOR DEBUG
+# REDIRECT STDOUT TO TEE AND KEEP DEBUG OUTPUT PRIVATE.
+chmod 600 "$SrceFllPth.log" "$SrceFllPth.debug" 2>/dev/null || true
+exec > >(tee "$SrceFllPth.log") 2>"$SrceFllPth.debug"
 set -uo pipefail
 set -x
 
-# CONCURRENT EXECUTION PROTECTION (LOCK FILE)
-LOCKFILE="/tmp/syno.plexupdate.lock"
-if [ -f "$LOCKFILE" ]; then
-  LockPid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
-  if [ -n "$LockPid" ] && [ "$LockPid" != "unknown" ] && kill -0 "$LockPid" 2>/dev/null; then
-    printf ' %s\n\n' "* Another instance is already running (PID: $LockPid) - exiting.."
-    exit 1
-  else
-    # Stale lock file, remove it
-    rm -f "$LOCKFILE"
-  fi
-fi
-trap 'rm -f "$LOCKFILE"' EXIT
-if ! (set -o noclobber; echo $$ > "$LOCKFILE") 2>/dev/null; then
-  LockPid=$(cat "$LOCKFILE" 2>/dev/null || echo "unknown")
-  if [ -n "$LockPid" ] && [ "$LockPid" != "unknown" ] && kill -0 "$LockPid" 2>/dev/null; then
-    printf ' %s\n\n' "* Another instance is already running (PID: $LockPid) - exiting.."
-    exit 1
-  fi
-  echo $$ > "$LOCKFILE"
-fi
-
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.2
+readonly SpuscrpVer=4.8.3
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
@@ -67,6 +56,8 @@ if [ "$EUID" -ne "0" ]; then
   printf "\n"
   exit 1
 fi
+
+ExitStatus=""
 
 # CHECK IF DEFAULT CONFIG FILE EXISTS, IF NOT CREATE IT
 create_or_update_config() {
@@ -115,23 +106,10 @@ fi
 MasterUpdt=false
 Rollback=false
 UpdtChannl=""
-ExitStatus=""
 
 # PRINT SCRIPT STATUS/DEBUG INFO
 printf '%16s %s\n'                   "Script:" "$SrceFileNm"
 printf '%16s %s\n'               "Script Dir:" "$(fold -w 72 -s     < <(printf '%s' "$SrceFolder") | sed '2,$s/^/                 /')"
-
-# CHECK FOR BASIC INTERNET CONNECTIVITY
-if nslookup one.one.one.one >/dev/null 2>&1; then
- #printf '\n %s\n\n' "* OK: DNS resolution works.."
-  :
-elif ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
-  printf '\n %s\n\n' "* DNS resolution appears to be failing - exiting.."
-  exit 1
-else
-  printf '\n %s\n\n' "* Internet appears to be down - exiting.."
-  exit 1
-fi
 
 # OVERRIDE SETTINGS WITH CLI OPTIONS
 while getopts ":a:c:mrfh" opt; do
@@ -192,6 +170,32 @@ while getopts ":a:c:mrfh" opt; do
   esac
 done
 
+# Validate numeric settings before arithmetic, downloads, or archive cleanup.
+for setting in MinimumAge OldUpdates NetTimeout; do
+  value=${!setting}
+  if [[ ! $value =~ ^[0-9]{1,9}$ ]]; then
+    printf ' %s\n' "* Invalid $setting: expected a nonnegative integer (at most 9 digits)."
+    exit 1
+  fi
+  printf -v "$setting" '%d' "$((10#$value))"
+done
+if [[ $SelfUpdate != 0 && $SelfUpdate != 1 ]]; then
+  printf ' %s\n' '* Invalid SelfUpdate: expected 0 or 1.'
+  exit 1
+fi
+
+# CHECK FOR BASIC INTERNET CONNECTIVITY
+if nslookup one.one.one.one >/dev/null 2>&1; then
+ #printf '\n %s\n\n' "* OK: DNS resolution works.."
+  :
+elif ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+  printf '\n %s\n\n' "* DNS resolution appears to be failing - exiting.."
+  exit 1
+else
+  printf '\n %s\n\n' "* Internet appears to be down - exiting.."
+  exit 1
+fi
+
 # CHECK IF SCRIPT IS ARCHIVED
 if [ ! -d "$SrceFolder/Archive/Scripts" ]; then
   mkdir -p "$SrceFolder/Archive/Scripts"
@@ -243,7 +247,10 @@ if GitHubJson=$(curl -s -m "$NetTimeout" -D "$SpusHeaders" -L "https://api.githu
 
   if [ -n "${SpusNewVer:-}" ] && [ "$SpusNewVer" != "null" ]; then
     SpusRlDate=$(date --date "$SpusRlDate_Raw" +'%s' 2>/dev/null || echo "0")
-    SpusRelAge=$(((TodaysDate-SpusRlDate)/86400))
+    SpusRelAge=-1
+    if [ "$SpusRlDate" -gt 0 ]; then
+      SpusRelAge=$(((TodaysDate-SpusRlDate)/86400))
+    fi
     if [ "$MasterUpdt" = "true" ]; then
       SpusDwnUrl=https://raw.githubusercontent.com/$GitHubRepo/master/syno.plexupdate.sh
       SpusRelDes=$'* Check GitHub for master branch commit messages and extended descriptions'
@@ -291,7 +298,9 @@ if [[ -n "$SpusNewVer" && "$SpusNewVer" != "null" ]]; then
         printf "\n"
         printf "%s\n" "INSTALLING NEW SCRIPT:"
         printf "%s\n" "----------------------------------------"
-        if /bin/wget -nv -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl" 2>&1; then
+        if /bin/wget -nv -T "$NetTimeout" -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl" 2>&1 &&
+          [ -s "$SrceFolder/Archive/Scripts/$SrceFileNm" ] &&
+          bash -n "$SrceFolder/Archive/Scripts/$SrceFileNm"; then
           # MAKE A COPY FOR UPGRADE COMPARISON BECAUSE WE ARE GOING TO MOVE NOT COPY THE NEW FILE
           cp -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" 2>&1
           # MOVE-OVERWRITE INSTEAD OF COPY-OVERWRITE TO NOT CORRUPT RUNNING IN-MEMORY VERSION OF SCRIPT
@@ -395,12 +404,14 @@ if [ -d "$PlexFolder/Updates" ]; then
   fi
 fi
 
-if [ -d "$SrceFolder/Archive/Packages" ]; then
+if [ "$Rollback" != "true" ] && [ -d "$SrceFolder/Archive/Packages" ]; then
   find "$SrceFolder/Archive/Packages" -type f -name "PlexMediaServer*.spk" -mtime +"$OldUpdates" -delete
 fi
 
-# SCRAPE PLEX ONLINE TOKEN
+# SCRAPE PLEX ONLINE TOKEN WITHOUT WRITING IT TO THE DEBUG LOG
+{ set +x; } 2>/dev/null
 PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
+set -x
 # SCRAPE PLEX SERVER UPDATE CHANNEL
 PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
 [ -n "$UpdtChannl" ] && PlexChannl="$UpdtChannl" # Override with command line option
@@ -409,18 +420,26 @@ PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.
 if [ "$Rollback" = "true" ]; then
   printf "\n%s\n" "ROLLBACK TO PREVIOUS VERSION:"
   printf "%s\n" "----------------------------------------"
-  # Find the previous package (second most recent)
-  PkgList=()
-  while IFS= read -r pkg; do
-    [ -n "$pkg" ] && PkgList+=("$pkg")
-  done < <(ls -t "$SrceFolder/Archive/Packages/PlexMediaServer"*.spk 2>/dev/null)
-  if [ "${#PkgList[@]}" -lt 2 ]; then
-    printf ' %s\n' "* No previous package found in Archive (found ${#PkgList[@]} package(s)) - cannot rollback"
-    printf "%s\n" "----------------------------------------"
-    /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed. No previous package found."}'
+  # Select the highest archived version below the installed version.
+  # Read metadata as text; never execute a package's INFO file.
+  PreviousPkg=""
+  PreviousVersion=""
+  for pkg in "$SrceFolder/Archive/Packages/"PlexMediaServer*.spk; do
+    [ -f "$pkg" ] || continue
+    PkgVersion=$(tar -xOf "$pkg" INFO 2>/dev/null | sed -n 's/^version="\([^"]*\)"$/\1/p')
+    PkgVersion=$(strip_build_version "$PkgVersion")
+    [[ $PkgVersion =~ ^[0-9]+(\.[0-9]+)+$ ]] || continue
+    if [ -n "$RunVersion" ] && /usr/bin/dpkg --compare-versions "$PkgVersion" lt "$RunVersion"; then
+      if [ -z "$PreviousVersion" ] || /usr/bin/dpkg --compare-versions "$PkgVersion" gt "$PreviousVersion"; then
+        PreviousPkg=$pkg
+        PreviousVersion=$PkgVersion
+      fi
+    fi
+  done
+  if [ -z "$PreviousPkg" ]; then
+    printf ' %s\n' '* No archived version older than the installed version was found - cannot rollback'
     exit 1
   fi
-  PreviousPkg="${PkgList[1]}"
   # Verify archive integrity before stopping Plex
   if ! tar -tf "$PreviousPkg" >/dev/null 2>&1; then
     printf ' %s\n' "* Previous package archive is corrupt or unreadable - cannot rollback"
@@ -431,7 +450,8 @@ if [ "$Rollback" = "true" ]; then
   printf '%16s %s\n' "Previous Package:" "$(basename "$PreviousPkg")"
   printf '%16s %s\n' "Current Version:" "$RunVersion"
   printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
-  /usr/syno/bin/synopkg stop    "PlexMediaServer"
+  InstallOK=true
+  /usr/syno/bin/synopkg stop "PlexMediaServer" || exit 1
   printf "\n%s\n" "Installing previous package (JSON):"
   /usr/syno/bin/synopkg install "$PreviousPkg" | \
     jq -c '.results[] |= (
@@ -446,20 +466,21 @@ if [ "$Rollback" = "true" ]; then
         )
       else .
       end
-    )'
+    )' || InstallOK=false
   printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
-  /usr/syno/bin/synopkg start   "PlexMediaServer"
+  /usr/syno/bin/synopkg start "PlexMediaServer" || InstallOK=false
   printf "%s\n" "----------------------------------------"
   NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer" 2>/dev/null || echo "")
   NowVersion=$(strip_build_version "$NowVersion")
   printf '%16s %s\n' "Rollback from:" "$RunVersion"
   printf '%16s %s'             "to:" "$NowVersion"
-  if [ -n "$NowVersion" ] && /usr/bin/dpkg --compare-versions "$RunVersion" gt "$NowVersion"; then
+  if [ "$InstallOK" = true ] && [ -n "$NowVersion" ] && /usr/bin/dpkg --compare-versions "$PreviousVersion" eq "$NowVersion"; then
     printf ' %s\n' "succeeded!"
     /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback completed successfully"}'
   else
     printf ' %s\n' "failed!"
     /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update rollback failed."}'
+    exit 1
   fi
   exit 0
 fi
@@ -475,12 +496,14 @@ else
     ChannelUrl="https://plex.tv/api/downloads/5.json"
   elif [ "$PlexChannl" -eq "8" ]; then
     # BETA SERVER UPDATE CHANNEL (REQUIRES PLEX PASS)
+    { set +x; } 2>/dev/null
     if [ -z "$PlexOToken" ]; then
       printf ' %s\n' "Beta channel requires a Plex Online Token but none was found - exiting.."
       /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Plex Media Server\n\nSyno.Plex Update task failed. Beta channel selected but no Plex Online Token found."}'
       printf "\n"
       exit 1
     fi
+    set -x
     ChannlName=Beta
     ChannelUrl="https://plex.tv/api/downloads/5.json?channel=plexpass"
   else
@@ -528,10 +551,11 @@ if [ "$_curl_rc" -eq "0" ] && [ -n "$PlexTvJson" ]; then
   NewVersion=$(strip_build_version "$NewVerFull")
   NewPackage="${NewDwnlUrl##*/}"
   # CALCULATE NEW PACKAGE AGE FROM RELEASE DATE
-  if [ -n "$NewVerDate" ] && [ "$NewVerDate" -gt 0 ] 2>/dev/null; then
+  if [[ $NewVerDate =~ ^[0-9]{1,11}$ ]] && [ "$NewVerDate" -gt 0 ]; then
+    NewVerDate=$((10#$NewVerDate))
     PackageAge=$(((TodaysDate-NewVerDate)/86400))
   else
-    PackageAge="0"
+    PackageAge="-1"
   fi
 else
   printf ' %s\n' "* UNABLE TO CHECK FOR LATEST VERSION OF PLEX MEDIA SERVER.."
@@ -570,6 +594,7 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     printf "%s\n" "----------------------------------------"
     printf "%s\n" "Downloading PlexMediaServer package:"
     PackagePath="$SrceFolder/Archive/Packages/$NewPackage"
+    InstallOK=false
     AlreadyDownloaded=false
     if [ -f "$PackagePath" ] && tar -tf "$PackagePath" >/dev/null 2>&1; then
       printf "%s\n" "* Package already exists and is valid in local Archive"
@@ -578,8 +603,9 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
 
     if [ "$AlreadyDownloaded" = "true" ] || /bin/wget -nv -c -P "$SrceFolder/Archive/Packages/" "$NewDwnlUrl" 2>&1; then
       if tar -tf "$PackagePath" >/dev/null 2>&1; then
+        InstallOK=true
         printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
-        /usr/syno/bin/synopkg stop    "PlexMediaServer"
+        /usr/syno/bin/synopkg stop "PlexMediaServer" || exit 1
         printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
         /usr/syno/bin/synopkg install "$PackagePath" | \
           jq -c '.results[] |= (
@@ -594,9 +620,9 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
               )
             else .
             end
-          )'
+          )' || InstallOK=false
         printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
-        /usr/syno/bin/synopkg start   "PlexMediaServer"
+        /usr/syno/bin/synopkg start "PlexMediaServer" || InstallOK=false
       else
         printf '\n %s\n' "* Downloaded package archive is corrupt or incomplete, skipping install.."
       fi
@@ -611,7 +637,7 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
     printf '%16s %s'             "to:" "$NewVersion"
 
     # REPORT PLEX UPDATE STATUS
-    if /usr/bin/dpkg --compare-versions "$NowVersion" gt "$RunVersion"; then
+    if [ "$InstallOK" = true ] && [ -n "$NowVersion" ] && /usr/bin/dpkg --compare-versions "$NowVersion" eq "$NewVersion"; then
       printf ' %s\n' "succeeded!"
       printf "\n"
       # UPDATE LOCAL VERSION CHANGELOG ONLY ON SUCCESSFUL INSTALL
@@ -677,9 +703,6 @@ else
 fi
 
 printf "\n"
-
-# CLOSE AND NORMALIZE THE LOGGING REDIRECTIONS
-exec >&- 2>&- 1>&2
 
 # EXIT NORMALLY BUT POSSIBLY WITH FORCED EXIT STATUS FOR SCRIPT NOTIFICATIONS
 if [ -n "$ExitStatus" ]; then

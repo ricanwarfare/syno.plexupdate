@@ -240,11 +240,13 @@ bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -r
 ```
 
 This will:
-1. Find the second-most-recent `.spk` file in the Archive/Packages directory
+1. Find the highest package version older than the installed version, using the archived package metadata (one older package is sufficient)
 2. Stop Plex Media Server
 3. Install the previous package
 4. Restart Plex Media Server
-5. Report success/failure via DSM notification
+5. Verify the selected version was installed and the restart command succeeded, then report success/failure via DSM notification
+
+Rollback skips archive age cleanup so an older package is not deleted before it can be used. A failed rollback exits with status 1.
 
 ### Force Install (Skip Age Check)
 
@@ -260,6 +262,12 @@ bash /volume1/homes/admin/scripts/bash/plex/syno.plexupdate.sh -f
 * If DSM 6 is not configured to allow 3rd-party "trusted publishers", the script will log "`error = [289]`" during the package installation process. Synology DSM 6 has been known to sporadically "lose" 3rd-party security certificates for unknown reasons. If this happens, you will have to re-add the Plex 'Public Key Certificate' to your system. DSM 7 no longer has this requirement.
 
 # Changelog
+
+### v4.8.3 (ricanwarfare fork)
+
+Improves concurrency protection, token privacy, rollback selection, installation failure
+reporting, configuration validation, and update age checks. Adds regression tests and
+self-update syntax validation. See [release notes](RELEASE_NOTES.md) for upgrade details.
 
 ### v4.8.0 (ricanwarfare fork)
 
@@ -303,3 +311,15 @@ Many thanks to:
 1. [turnmike2](https://github.com/turnmike2) for the idea of logged output to file
 
 [![paypal](https://www.paypalobjects.com/en_US/i/btn/btn_donateCC_LG.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=2RYY4BETEQAJC)
+
+### Local regression checks
+
+Run `python3 -m unittest discover -s tests -v` and `bash -n syno.plexupdate.sh`.
+The tests execute isolated sections of the updater with temporary archives and mocked
+Synology commands; they do not install packages or contact Plex.
+
+The updater uses an atomic lock directory at `/tmp/syno.plexupdate.lock.d`.
+Normal exits and termination signals release the lock. After an uncatchable kill,
+verify that no updater is running before removing that directory manually.
+Logs are restricted to their owner. Numeric configuration values must be nonnegative
+integers with at most nine digits; `SelfUpdate` must be `0` or `1`.

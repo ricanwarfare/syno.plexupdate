@@ -19,3 +19,9 @@ jobs:
           scandir: '.'
           ignore_paths: >-
             Tools
+
+      - name: Check Bash syntax
+        run: bash -n syno.plexupdate.sh
+
+      - name: Run updater regression tests
+        run: python3 -m unittest discover -s tests -v
