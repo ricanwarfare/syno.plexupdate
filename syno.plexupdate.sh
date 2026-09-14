@@ -26,9 +26,35 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
   printf ' %s\n' "* Another instance may be running. If no updater is running, remove $LOCKDIR and retry."
   exit 1
 fi
-trap 'rmdir "$LOCKDIR"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+
+# ── SECRET REDACTION ────────────────────────────────────────────────────────
+# The token is handled under `set +x` guards, but a guard only protects the
+# lines that have one: the whole script runs with `set -x`, so any future edit
+# that touches the variable outside a guarded region writes it in clear to the
+# .debug log. Rather than trust every present and future author to remember,
+# scrub the known secret out of both logs on the way out. This is the safety
+# net, not the primary control.
+PlexOToken=""
+redact_secrets_from_logs() {
+  [ -n "${SrceFllPth:-}" ] || return 0
+  for _logf in "$SrceFllPth.debug" "$SrceFllPth.log"; do
+    [ -s "$_logf" ] || continue
+    # Token value, wherever it appeared.
+    if [ -n "${PlexOToken:-}" ] && grep -qF -- "$PlexOToken" "$_logf" 2>/dev/null; then
+      grep -vF -- "$PlexOToken" "$_logf" > "$_logf.redacted" 2>/dev/null &&
+        mv -f "$_logf.redacted" "$_logf"
+      chmod 600 "$_logf" 2>/dev/null || true
+    fi
+    # Header form, in case only the header line survived.
+    sed -i 's/\(X-Plex-Token: \)[^ "]*/\1****REDACTED****/g' "$_logf" 2>/dev/null || true
+    rm -f "$_logf.redacted" 2>/dev/null || true
+  done
+  return 0
+}
+
+trap 'redact_secrets_from_logs; rmdir "$LOCKDIR" 2>/dev/null' EXIT
+trap 'redact_secrets_from_logs; exit 130' INT
+trap 'redact_secrets_from_logs; exit 143' TERM
 
 # REDIRECT STDOUT TO TEE AND KEEP DEBUG OUTPUT PRIVATE.
 chmod 600 "$SrceFllPth.log" "$SrceFllPth.debug" 2>/dev/null || true
@@ -37,7 +63,7 @@ set -uo pipefail
 set -x
 
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.3
+readonly SpuscrpVer=4.8.4
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
@@ -223,6 +249,7 @@ SpusRelAge=""
 SpusDwnUrl=""
 SpusRelDes=""
 SpusHlpUrl=""
+SpusDwnSha=""
 SpusHeaders="/tmp/syno.plexupdate.gh_headers.$$"
 
 if GitHubJson=$(curl -s -m "$NetTimeout" -D "$SpusHeaders" -L "https://api.github.com/repos/$GitHubRepo/releases?per_page=1"); then
@@ -293,22 +320,58 @@ if [[ -n "$SpusNewVer" && "$SpusNewVer" != "null" ]]; then
       printf '%17s%s\n' '' "* Newer version found!"
     fi
     # DOWNLOAD AND INSTALL THE SCRIPT UPDATE
-    if [ "$SelfUpdate" -eq "1" ]; then
+    if [ "$SelfUpdate" -eq 1 ]; then
       if [ "$SpusRelAge" -ge "$MinimumAge" ] || [ "$MasterUpdt" = "true" ] || [ "$SkipAgeCheck" = "true" ]; then
         printf "\n"
         printf "%s\n" "INSTALLING NEW SCRIPT:"
         printf "%s\n" "----------------------------------------"
-        if /bin/wget -nv -T "$NetTimeout" -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl" 2>&1 &&
-          [ -s "$SrceFolder/Archive/Scripts/$SrceFileNm" ] &&
-          bash -n "$SrceFolder/Archive/Scripts/$SrceFileNm"; then
-          # MAKE A COPY FOR UPGRADE COMPARISON BECAUSE WE ARE GOING TO MOVE NOT COPY THE NEW FILE
-          cp -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" 2>&1
-          # MOVE-OVERWRITE INSTEAD OF COPY-OVERWRITE TO NOT CORRUPT RUNNING IN-MEMORY VERSION OF SCRIPT
-          mv -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm"     "$SrceFolder/$SrceFileNm"                     2>&1
-          chmod +x "$SrceFolder/$SrceFileNm"
-          printf "%s\n" "----------------------------------------"
-          if cmp -s   "$SrceFolder/Archive/Scripts/$SrceFileNm.cmp" "$SrceFolder/$SrceFileNm"; then
-            printf '%17s%s\n' '' "* Script update succeeded!"
+
+        # RESOLVE THE EXPECTED BLOB SHA FROM THE API (not from the same download
+        # we are about to trust). This script runs as root and replace-executes
+        # itself, so a plain wget + mv -f means anyone able to answer for
+        # raw.githubusercontent.com owns root on this NAS. Binding the download
+        # to a git blob id fetched over the API turns "the bytes we happened to
+        # receive" into "the bytes GitHub says are at that ref"; HTTPS alone
+        # does not pin content across a CDN.
+        SpusRefForSha="master"
+        [ "$MasterUpdt" = "true" ] || SpusRefForSha="v$SpusNewVer"
+        SpusDwnSha=$(curl -s -m "$NetTimeout" -L \
+              "https://api.github.com/repos/$GitHubRepo/contents/syno.plexupdate.sh?ref=$SpusRefForSha" \
+              2>/dev/null | jq -r '.sha // ""' 2>/dev/null)
+
+        if [ -z "$SpusDwnSha" ] || [ "$SpusDwnSha" = "null" ]; then
+          printf ' %s\n' "* SECURITY: could not resolve the expected blob SHA from the GitHub API."
+          printf ' %s\n' "* Refusing to self-update an unverifiable script. Update manually from:"
+          printf ' %s\n' "*   $SpusHlpUrl"
+          ExitStatus=1
+        elif ! /bin/wget -nv -T "$NetTimeout" -O "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SpusDwnUrl" 2>&1; then
+          printf '%17s%s\n' '' "* DOWNLOAD FAILED - skipping."
+          /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update failed to download."}'
+          ExitStatus=1
+        elif [ ! -s "$SrceFolder/Archive/Scripts/$SrceFileNm" ] || ! bash -n "$SrceFolder/Archive/Scripts/$SrceFileNm"; then
+          printf '%17s%s\n' '' "* DOWNLOADED FILE INVALID - skipping."
+          rm -f "$SrceFolder/Archive/Scripts/$SrceFileNm"
+          ExitStatus=1
+        else
+          # VERIFY CONTENT against the API-reported blob SHA-1. This is a git
+          # object id, not a hash of the raw file bytes, so the git blob header
+          # is part of the digest.
+          _SpusGotSha=$( { printf 'blob %s\0' "$(wc -c < "$SrceFolder/Archive/Scripts/$SrceFileNm" | tr -d ' ')"; \
+                           cat "$SrceFolder/Archive/Scripts/$SrceFileNm"; } | sha1sum | cut -d' ' -f1 )
+          if [ "$_SpusGotSha" != "$SpusDwnSha" ]; then
+            printf ' %s\n' "* SECURITY: downloaded script FAILED integrity verification."
+            printf '%17s%s\n' '' "expected: $SpusDwnSha"
+            printf '%17s%s\n' '' "got:      $_SpusGotSha"
+            printf ' %s\n' "* Refusing to install; the file has been discarded."
+            rm -f "$SrceFolder/Archive/Scripts/$SrceFileNm"
+            /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nScript self-update FAILED integrity verification and was not installed. Investigate immediately."}'
+            ExitStatus=1
+          else
+            # MOVE-OVERWRITE (not copy) so the running in-memory script is not corrupted.
+            mv -f -v "$SrceFolder/Archive/Scripts/$SrceFileNm" "$SrceFolder/$SrceFileNm" 2>&1
+            chmod +x "$SrceFolder/$SrceFileNm"
+            printf "%s\n" "----------------------------------------"
+            printf '%17s%s\n' '' "* Script update succeeded (integrity verified)!"
             /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update completed successfully"}'
             ExitStatus=1
             if [ -n "$SpusRelDes" ]; then
@@ -320,23 +383,12 @@ if [[ -n "$SpusNewVer" && "$SpusNewVer" != "null" ]]; then
               printf "%s\n" "----------------------------------------"
               printf "%s\n" "Report issues to: $SpusHlpUrl"
             fi
-          else
-            printf '%17s%s\n' '' "* Script update failed to overwrite."
-            /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update failed."}'
-            ExitStatus=1
           fi
-        else
-          printf '%17s%s\n' '' "* Script update failed to download."
-          /usr/syno/bin/synonotify PKGHasUpgrade '{"%PKG_HAS_UPDATE%": "Syno.Plex Update\n\nSelf-Update failed to download."}'
-          ExitStatus=1
         fi
       else
         printf ' \n%s\n' "Script update is too new ($SpusRelAge days), requires $MinimumAge+ days - skipping.."
       fi
-      # DELETE TEMP COMPARISON FILE
-      find "$SrceFolder/Archive/Scripts" -maxdepth 1 -type f -name "$SrceFileNm.cmp" -delete
     fi
-  
   else
     printf '%17s%s\n' '' "* No new version found."
   fi
@@ -411,6 +463,13 @@ fi
 # SCRAPE PLEX ONLINE TOKEN WITHOUT WRITING IT TO THE DEBUG LOG
 { set +x; } 2>/dev/null
 PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
+# Masked form for every log/console line: the token must never be echoed.
+# (${var: -4} is the last 4 chars; a token shorter than 8 chars is fully hidden.)
+if [ "${#PlexOToken}" -ge 8 ]; then
+  PlexOTokenMasked="****${PlexOToken: -4}"
+else
+  PlexOTokenMasked="****"
+fi
 set -x
 # SCRAPE PLEX SERVER UPDATE CHANNEL
 PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
