@@ -63,7 +63,7 @@ set -uo pipefail
 set -x
 
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.4
+readonly SpuscrpVer=4.8.5
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"
@@ -112,10 +112,72 @@ create_or_update_config() {
 }
 create_or_update_config "$SrceFolder/config.ini"
 
-# LOAD CONFIG FILE IF IT EXISTS
-if [ -f "$SrceFolder/config.ini" ]; then
-  source "$SrceFolder/config.ini"
-fi
+# LOAD CONFIG FILE -- PARSED, NEVER EXECUTED
+# `source`ing this file ran whatever it contained as root. The config sits next
+# to the script, which is wherever the operator put it -- the documented
+# install path in this very header is a user's home directory -- so anyone able
+# to write config.ini, or to replace it (its containing directory's write bit
+# is enough, since unlink is a property of the directory and not of the file),
+# obtained arbitrary root execution on the NAS.
+#
+# Only the five known settings are read, each value is validated against the
+# shape that setting actually accepts, and anything unrecognised is reported
+# and ignored instead of run. A tampered config now degrades to "your setting
+# was ignored", not to code execution.
+load_config() {
+  local ConfigFile="$1" line key value
+  [ -f "$ConfigFile" ] || return 0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip blank lines and comments.
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    # Anything that is not KEY=VALUE is not a setting; never execute it.
+    case "$line" in
+      *=*) ;;
+      *)
+        printf ' %s\n' "* SECURITY: ignoring non-setting line in config.ini: ${line:0:60}"
+        continue
+        ;;
+    esac
+
+    key=${line%%=*}
+    value=${line#*=}
+    # Trim whitespace, then one layer of matching quotes.
+    key=$(printf '%s' "$key" | tr -d '[:space:]')
+    value=$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                                          -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+
+    case "$key" in
+      MinimumAge|OldUpdates|NetTimeout)
+        if [[ $value =~ ^[0-9]+$ ]]; then
+          printf -v "$key" '%s' "$value"
+        else
+          printf ' %s\n' "* SECURITY: ignoring non-numeric $key in config.ini: ${value:0:40}"
+        fi
+        ;;
+      SelfUpdate)
+        if [[ $value =~ ^[01]$ ]]; then
+          printf -v "$key" '%s' "$value"
+        else
+          printf ' %s\n' "* SECURITY: ignoring invalid SelfUpdate in config.ini: ${value:0:40}"
+        fi
+        ;;
+      SkipAgeCheck)
+        if [[ $value =~ ^(0|1|true|false)$ ]]; then
+          printf -v "$key" '%s' "$value"
+        else
+          printf ' %s\n' "* SECURITY: ignoring invalid SkipAgeCheck in config.ini: ${value:0:40}"
+        fi
+        ;;
+      *)
+        printf ' %s\n' "* SECURITY: ignoring unknown setting in config.ini: ${key:0:40}"
+        ;;
+    esac
+  done < "$ConfigFile"
+}
+load_config "$SrceFolder/config.ini"
 
 # SET DEFAULTS FOR ALL CONFIG VARIABLES
 MinimumAge="${MinimumAge:-7}"
