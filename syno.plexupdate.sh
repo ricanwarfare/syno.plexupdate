@@ -52,7 +52,7 @@ redact_secrets_from_logs() {
   return 0
 }
 
-trap 'redact_secrets_from_logs; rmdir "$LOCKDIR" 2>/dev/null' EXIT
+trap 'redact_secrets_from_logs; rm -f "${SpusHeaders:-}" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null' EXIT
 trap 'redact_secrets_from_logs; exit 130' INT
 trap 'redact_secrets_from_logs; exit 143' TERM
 
@@ -312,7 +312,7 @@ SpusDwnUrl=""
 SpusRelDes=""
 SpusHlpUrl=""
 SpusDwnSha=""
-SpusHeaders="/tmp/syno.plexupdate.gh_headers.$$"
+SpusHeaders="$(mktemp /tmp/syno.plexupdate.gh_headers.XXXXXX)"
 
 if GitHubJson=$(curl -s -m "$NetTimeout" -D "$SpusHeaders" -L "https://api.github.com/repos/$GitHubRepo/releases?per_page=1"); then
   SpusApiRlm=$(grep -i '^x-ratelimit-limit:' "$SpusHeaders" 2>/dev/null | tr -d '\r' | awk '{print $2}')
