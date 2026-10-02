@@ -525,13 +525,10 @@ fi
 # SCRAPE PLEX ONLINE TOKEN WITHOUT WRITING IT TO THE DEBUG LOG
 { set +x; } 2>/dev/null
 PlexOToken=$(grep -oP "PlexOnlineToken=\"\K[^\"]+"     "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
-# Masked form for every log/console line: the token must never be echoed.
-# (${var: -4} is the last 4 chars; a token shorter than 8 chars is fully hidden.)
-if [ "${#PlexOToken}" -ge 8 ]; then
-  PlexOTokenMasked="****${PlexOToken: -4}"
-else
-  PlexOTokenMasked="****"
-fi
+# No masked copy is kept: nothing in this script ever prints the token, and the
+# `set +x` guards above (plus redact_secrets_from_logs at exit) are the controls
+# that actually protect it. A dead `PlexOTokenMasked` variable only trips
+# ShellCheck SC2034, which fails the lint job at the default `style` severity.
 set -x
 # SCRAPE PLEX SERVER UPDATE CHANNEL
 PlexChannl=$(grep -oP "ButlerUpdateChannel=\"\K[^\"]+" "$PlexFolder/Preferences.xml" 2>/dev/null || echo "")
