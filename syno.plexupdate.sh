@@ -92,10 +92,15 @@ restore_plex_state() {
 }
 prepare_plex_install() {
   local state
-  # DSM can return nonzero for a stopped package; validate the JSON state,
-  # rather than treating every nonzero status as 'stopped'. Unknown is unsafe.
-  state=$(/usr/syno/bin/synopkg status "PlexMediaServer" 2>/dev/null || true)
-  state=$(jq -r '.status // empty' <<< "$state" 2>/dev/null) || return 1
+  # A failed DSM query can say "stop" even while Plex is running (e.g.
+  # diagnostic code 263). Require a successful, error-free query; refusing
+  # ambiguous stopped responses is safer than restoring the wrong state.
+  if ! state=$(/usr/syno/bin/synopkg status "PlexMediaServer" 2>/dev/null); then
+    printf ' %s\n' '* Cannot query Plex service state; refusing installation.'
+    return 1
+  fi
+  state=$(jq -er 'select((.aspect.active.status_code // 0) == 0) | .status // empty' \
+    <<< "$state" 2>/dev/null) || return 1
   case "$state" in
     running) RecoveryAction=start ;;
     stop|stopped) RecoveryAction=stop ;;

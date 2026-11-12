@@ -255,7 +255,7 @@ rollback exits with status 1.
 ### Interrupted installs and service recovery
 
 Both updates and rollbacks check the local Plex service state before stopping it.
-An unrecognized/malformed status aborts before installation. A service that was
+An unrecognized/malformed status, nonzero status-query exit, or DSM diagnostic error aborts before installation. This deliberately refuses ambiguous stopped-state responses rather than guessing. A service that was
 running is restarted after installation or a caught interruption; one that was
 already stopped is kept stopped (including after an installation failure).
 

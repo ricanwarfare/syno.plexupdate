@@ -152,6 +152,24 @@ esac
             self.assertNotIn('install', calls)
             self.assertFalse((root / 'lock').exists())
 
+    def test_dsm_status_query_failure_refuses_installation(self):
+        for status_rc in (0, 7):
+            with self.subTest(status_rc=status_rc), tempfile.TemporaryDirectory() as tmp:
+                root, env = self.fixture(tmp, 'running')
+                stub = root / 'bin/synopkg'
+                original = stub.read_text()
+                failed_status = ''' status) echo '{"aspect":{"active":{"status":"stop","status_code":263,"status_description":"failed to get unit status"}},"description":"Status: [263], package is stopped","package":"PlexMediaServer","status":"stop"}'; exit STATUS_RC ;;'''.replace('STATUS_RC', str(status_rc))
+                status_line = next(line for line in original.splitlines() if line.startswith(' status)'))
+                stub.write_text(original.replace(status_line, failed_status))
+                result = subprocess.run(['bash', str(root / 'updater.sh'), '-r'], env=env,
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                calls = (root / 'calls').read_text().splitlines()
+                self.assertNotIn('stop', calls)
+                self.assertNotIn('install', calls)
+                self.assertEqual((root / 'state').read_text().strip(), 'running')
+                self.assertFalse((root / 'lock').exists())
+
     def test_hup_rollback_waits_for_installer_before_recovery(self):
         self.interrupted(True, sig=signal.SIGHUP)
 
