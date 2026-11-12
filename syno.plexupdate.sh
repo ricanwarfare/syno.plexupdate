@@ -150,7 +150,7 @@ set -uo pipefail
 set -x
 
 # SCRIPT VERSION
-readonly SpuscrpVer=4.8.5
+readonly SpuscrpVer=4.8.6
 readonly MinDSMVers=7.0
 # PRINT OUR GLORIOUS HEADER BECAUSE WE ARE FULL OF OURSELVES
 printf "\n"

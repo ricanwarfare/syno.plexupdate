@@ -1,3 +1,25 @@
+## v4.8.6
+
+- Allow archived-package rollback without DNS, internet, GitHub checks or script self-update, including when `SelfUpdate=1` and `-m` are set.
+- Defer TERM/INT/HUP cancellation while a tracked package operation completes, then restore the original Plex running/stopped state before releasing the updater lock.
+- Refuse installation when DSM service-state queries fail or report diagnostic errors, rather than interpreting an error as a stopped service.
+- Cover offline rollback, interruption during stop/install, repeated signals, competing invocations, launch/PID assignment races and ambiguous DSM status responses with isolated regression tests.
+- Use unpredictable temporary files for GitHub response headers and remove a dead token-masking variable that broke ShellCheck.
+
+### Updating
+
+Automatic script updates require `SelfUpdate=1` and respect `MinimumAge`. The new script takes effect on the following run. Manual deployment can replace only `syno.plexupdate.sh`; preserve `config.ini` and `Archive`.
+
+### Safety and verification
+
+- Independent review passed. All 17 regression tests pass using mocked Synology/network commands; Bash syntax and GitHub CI checks pass.
+- Live Plex package installation and rollback have not been exercised as part of this release.
+- SIGKILL and power loss cannot run cleanup traps. A hung package operation intentionally retains the updater lock; inspect DSM before intervening. Work that DSM delegates beyond the lifetime of its CLI is outside Bash's guarantees.
+- Ambiguous service-state responses abort without stopping or installing Plex; no guessed restoration state is used.
+- Retention policy, download timeout handling, HTTP health checks and legacy success exit-status semantics are unchanged.
+
+Release notes prepared by JARVIS, Agustin's AI assistant.
+
 ## v4.8.3
 
 - Prevent concurrent updater runs from removing each other's lock or truncating active logs.
