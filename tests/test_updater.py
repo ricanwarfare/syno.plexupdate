@@ -63,10 +63,12 @@ class UpdaterTests(unittest.TestCase):
 
     def test_update_requires_install_and_restart_success(self):
         code = section('strip_build_version() {', '# CHECK IF ROOT')
+        code += section('# Package operations are asynchronous', 'cleanup_updater() {')
         code += """
 synopkg() {
   echo "$1" >> "$CALL_LOG"
   case "$1" in
+    status) echo '{"status":"running"}' ;;
     stop) return "$STOP_RC" ;;
     install) echo '{"results": []}'; return "$INSTALL_RC" ;;
     start) return "$START_RC" ;;
@@ -84,7 +86,7 @@ tar() { return 0; }
             archive = Path(tmp) / 'Archive' / 'Packages'
             archive.mkdir(parents=True)
             (archive / 'PlexMediaServer.spk').touch()
-            values = dict(SrceFolder=tmp, RunVersion='1.2.0', NewVersion='1.3.0',
+            values = dict(SrceFolder=tmp, LOCKDIR=tmp, RunVersion='1.2.0', NewVersion='1.3.0',
                           NewPackage='PlexMediaServer.spk', PackageAge='10', MinimumAge='7',
                           SkipAgeCheck='false', NewVerDate='', ChannlName='Public',
                           NewVerAddd='', NewVerFixd='', STOP_RC='0', INSTALL_RC='0',
@@ -99,7 +101,7 @@ tar() { return 0; }
                     self.assertNotIn('succeeded!', result.stdout)
             Path(values['CALL_LOG']).write_text('')
             self.assertEqual(run(code, **dict(values, STOP_RC='1')).returncode, 1)
-            self.assertEqual(Path(values['CALL_LOG']).read_text(), 'stop\n')
+            self.assertEqual(Path(values['CALL_LOG']).read_text(), 'status\nstop\n')
 
     def test_invalid_release_date_does_not_pass_zero_day_threshold(self):
         code = section(
@@ -124,10 +126,12 @@ sys.exit(0 if {'lt': a < b, 'gt': a > b, 'eq': a == b}[op] else 1)
 ''')
             comparator.chmod(0o700)
             code = section('strip_build_version() {', '# CHECK IF ROOT')
+            code += section('# Package operations are asynchronous', 'cleanup_updater() {')
             code += '''
 synopkg() {
   echo "$1" >> "$CALL_LOG"
   case "$1" in
+    status) echo '{"status":"running"}' ;;
     stop) return "$STOP_RC" ;;
     install) echo '{"results": []}'; return "$INSTALL_RC" ;;
     start) return "$START_RC" ;;
@@ -139,7 +143,7 @@ synonotify() { :; }
             code += section('# ROLLBACK FUNCTIONALITY', 'if [ -z "$PlexChannl" ]; then')
             code = code.replace('/usr/bin/dpkg', shlex.quote(str(comparator)))
             code = code.replace('/usr/syno/bin/synopkg', 'synopkg').replace('/usr/syno/bin/synonotify', 'synonotify')
-            values = dict(SrceFolder=tmp, Rollback='true', RunVersion='1.4.0',
+            values = dict(SrceFolder=tmp, LOCKDIR=tmp, Rollback='true', RunVersion='1.4.0',
                           STOP_RC='0', INSTALL_RC='0', START_RC='0', AFTER_VERSION='1.3.0',
                           CALL_LOG=str(Path(tmp) / 'calls'))
 
@@ -168,7 +172,7 @@ synonotify() { :; }
                     self.assertIn('start', Path(values['CALL_LOG']).read_text())
             Path(values['CALL_LOG']).write_text('')
             self.assertEqual(run(code, **dict(values, STOP_RC='1')).returncode, 1)
-            self.assertEqual(Path(values['CALL_LOG']).read_text(), 'stop\n')
+            self.assertEqual(Path(values['CALL_LOG']).read_text(), 'status\nstop\n')
             self.assertEqual(run(code, **dict(values, RunVersion='1.0.0')).returncode, 1)
 
 

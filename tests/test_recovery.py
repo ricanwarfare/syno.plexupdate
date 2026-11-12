@@ -69,6 +69,8 @@ esac
         code = code.replace('/bin/wget', str(bindir / 'wget'))
         code = code.replace('/etc.defaults/VERSION', str(root / 'VERSION'))
         code = code.replace('/var/packages/PlexMediaServer/shares/PlexMediaServer', str(root / 'missing-share'))
+        code = code.replace('PlexFolder="$PlexFolder/AppData/Plex Media Server"',
+                            'PlexFolder=' + str(root / 'plex-fixture'))
         code = code.replace('if [ "$EUID" -ne "0" ]; then', 'if false; then')
         script = root / 'updater.sh'
         script.write_text(code)
@@ -94,6 +96,16 @@ esac
                     time.sleep(.01)
                 self.assertTrue(marker.exists(), 'mock did not reach interruption point')
                 proc.send_signal(sig)
+                # Cancellation waits for the in-flight package operation. A
+                # second signal and competing entrypoint must not unlock it.
+                time.sleep(.1)
+                self.assertIsNone(proc.poll())
+                self.assertTrue((root / 'lock').is_dir())
+                proc.send_signal(sig)
+                contender = subprocess.run(['bash', str(root / 'updater.sh'), '-r'], env=env,
+                                           capture_output=True, text=True, timeout=3)
+                self.assertEqual(contender.returncode, 1)
+                self.assertIn('Another instance', contender.stdout)
                 out, err = proc.communicate(timeout=8)
                 self.assertEqual(proc.returncode, 128 + sig, out + err)
                 self.assertEqual((root / 'state').read_text().strip(), state)
@@ -108,6 +120,18 @@ esac
                     proc.kill()
                     proc.communicate(timeout=5)
 
+    def test_signal_between_launch_and_pid_assignment_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, env = self.fixture(tmp)
+            script = root / 'updater.sh'
+            script.write_text(script.read_text().replace('  PackagePID=$!\n', '  kill -TERM "$$"\n  PackagePID=$!\n'))
+            result = subprocess.run(['bash', str(script), '-r'], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+            self.assertEqual((root / 'state').read_text().strip(), 'running')
+            self.assertFalse((root / 'lock').exists())
+            self.assertNotIn('install', (root / 'calls').read_text().splitlines())
+
     def test_term_update_waits_for_installer_before_recovery(self):
         self.interrupted(False)
 
@@ -116,6 +140,20 @@ esac
 
     def test_int_rollback_waits_for_installer_before_recovery(self):
         self.interrupted(True, sig=signal.SIGINT)
+
+    def test_unknown_initial_state_refuses_before_stop_or_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, env = self.fixture(tmp, 'unknown')
+            result = subprocess.run(['bash', str(root / 'updater.sh'), '-r'], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            calls = (root / 'calls').read_text().splitlines()
+            self.assertNotIn('stop', calls)
+            self.assertNotIn('install', calls)
+            self.assertFalse((root / 'lock').exists())
+
+    def test_hup_rollback_waits_for_installer_before_recovery(self):
+        self.interrupted(True, sig=signal.SIGHUP)
 
     def test_term_during_stop_recovers(self):
         self.interrupted(True, during_stop=True)

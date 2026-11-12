@@ -52,9 +52,91 @@ redact_secrets_from_logs() {
   return 0
 }
 
-trap 'redact_secrets_from_logs; rm -f "${SpusHeaders:-}" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null' EXIT
-trap 'redact_secrets_from_logs; exit 130' INT
-trap 'redact_secrets_from_logs; exit 143' TERM
+# Package operations are asynchronous so a signal interrupts wait, not an
+# untracked foreground pipeline. Never kill synopkg mid-transaction: DSM may
+# delegate installation to another process. Defer cancellation until it returns.
+PackagePID=""
+RecoveryAction=""
+InstallOutput=""
+PackageLaunching=false
+CancellationStatus=0
+cancel_updater() {
+  # Do not exit between spawning an operation and recording its PID.
+  if [ "$PackageLaunching" = true ]; then
+    CancellationStatus=$1
+  else
+    exit "$1"
+  fi
+}
+run_package_operation() {
+  PackageLaunching=true
+  /usr/syno/bin/synopkg "$@" &
+  PackagePID=$!
+  PackageLaunching=false
+  [ "$CancellationStatus" -eq 0 ] || exit "$CancellationStatus"
+  wait_package_operation
+}
+wait_package_operation() {
+  local rc=0
+  if [ -n "$PackagePID" ]; then
+    wait "$PackagePID" || rc=$?
+    PackagePID=""
+  fi
+  return "$rc"
+}
+restore_plex_state() {
+  [ -n "$RecoveryAction" ] || return 0
+  printf '\n %s\n' "* Restoring Plex service state ($RecoveryAction)."
+  run_package_operation "$RecoveryAction" "PlexMediaServer" || return 1
+  RecoveryAction=""
+}
+prepare_plex_install() {
+  local state
+  # DSM can return nonzero for a stopped package; validate the JSON state,
+  # rather than treating every nonzero status as 'stopped'. Unknown is unsafe.
+  state=$(/usr/syno/bin/synopkg status "PlexMediaServer" 2>/dev/null || true)
+  state=$(jq -r '.status // empty' <<< "$state" 2>/dev/null) || return 1
+  case "$state" in
+    running) RecoveryAction=start ;;
+    stop|stopped) RecoveryAction=stop ;;
+    *) printf ' %s\n' '* Cannot determine Plex service state; refusing installation.'; return 1 ;;
+  esac
+  # Arm recovery BEFORE issuing stop, including stop failure or interruption.
+  run_package_operation stop "PlexMediaServer"
+}
+install_plex_package() {
+  local rc=0
+  InstallOutput=$(mktemp "$LOCKDIR/install.XXXXXX") || return 1
+  run_package_operation install "$1" > "$InstallOutput" || rc=$?
+  jq -c '.results[] |= (
+    if (.scripts // empty) | type == "array" then
+      .scripts |= map(if .message then .message |= (gsub("<[^>]*>"; "") | split("\n")[0]) else . end)
+    else . end
+  )' "$InstallOutput" || rc=1
+  rm -f "$InstallOutput"
+  InstallOutput=""
+  return "$rc"
+}
+cleanup_updater() {
+  local rc=$?
+  # Repeated TERM/INT must not interrupt the wait and release the lock early.
+  trap '' INT TERM HUP
+  CancellationStatus=0
+  PackageLaunching=false
+  wait_package_operation || true
+  if ! restore_plex_state; then
+    printf ' %s\n' '* Plex service recovery failed; inspect Package Center before retrying.'
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+  redact_secrets_from_logs
+  rm -f "${InstallOutput:-}" "${SpusHeaders:-}" 2>/dev/null
+  rmdir "$LOCKDIR" 2>/dev/null
+  exit "$rc"
+}
+trap cleanup_updater EXIT
+trap 'cancel_updater 130' INT
+trap 'cancel_updater 143' TERM
+trap 'cancel_updater 129' HUP
 
 # REDIRECT STDOUT TO TEE AND KEEP DEBUG OUTPUT PRIVATE.
 chmod 600 "$SrceFllPth.log" "$SrceFllPth.debug" 2>/dev/null || true
@@ -273,6 +355,8 @@ if [[ $SelfUpdate != 0 && $SelfUpdate != 1 ]]; then
 fi
 
 # CHECK FOR BASIC INTERNET CONNECTIVITY
+# Rollback is strictly local, even with SelfUpdate=1 or -m.
+if [ "$Rollback" != "true" ]; then
 if nslookup one.one.one.one >/dev/null 2>&1; then
  #printf '\n %s\n\n' "* OK: DNS resolution works.."
   :
@@ -457,6 +541,8 @@ if [[ -n "$SpusNewVer" && "$SpusNewVer" != "null" ]]; then
 fi
 printf "\n"
 
+fi # End online-only script checks/self-update.
+
 # SCRAPE SYNOLOGY HARDWARE MODEL
 if [ -f /proc/sys/kernel/syno_hw_version ]; then
   SynoHModel=$(< /proc/sys/kernel/syno_hw_version)
@@ -569,24 +655,10 @@ if [ "$Rollback" = "true" ]; then
   printf '%16s %s\n' "Current Version:" "$RunVersion"
   printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
   InstallOK=true
-  /usr/syno/bin/synopkg stop "PlexMediaServer" || exit 1
+  prepare_plex_install || exit 1
   printf "\n%s\n" "Installing previous package (JSON):"
-  /usr/syno/bin/synopkg install "$PreviousPkg" | \
-    jq -c '.results[] |= (
-      if (.scripts // empty) | type == "array" then
-        .scripts |= map(
-          if .message then
-            .message |= (
-              gsub("<[^>]*>"; "")     # Strip HTML
-              | split("\n")[0]        # Keep only the first real line
-            )
-          else . end
-        )
-      else .
-      end
-    )' || InstallOK=false
-  printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
-  /usr/syno/bin/synopkg start "PlexMediaServer" || InstallOK=false
+  install_plex_package "$PreviousPkg" || InstallOK=false
+  restore_plex_state || InstallOK=false
   printf "%s\n" "----------------------------------------"
   NowVersion=$(/usr/syno/bin/synopkg version "PlexMediaServer" 2>/dev/null || echo "")
   NowVersion=$(strip_build_version "$NowVersion")
@@ -723,24 +795,10 @@ elif /usr/bin/dpkg --compare-versions "$NewVersion" gt "$RunVersion"; then
       if tar -tf "$PackagePath" >/dev/null 2>&1; then
         InstallOK=true
         printf "\n%s\n"   "Stopping PlexMediaServer service (JSON):"
-        /usr/syno/bin/synopkg stop "PlexMediaServer" || exit 1
+        prepare_plex_install || exit 1
         printf "\n%s\n" "Installing PlexMediaServer update (JSON):"
-        /usr/syno/bin/synopkg install "$PackagePath" | \
-          jq -c '.results[] |= (
-            if (.scripts // empty) | type == "array" then
-              .scripts |= map(
-                if .message then
-                  .message |= (
-                    gsub("<[^>]*>"; "")     # Strip HTML
-                    | split("\n")[0]        # Keep only the first real line
-                  )
-                else . end
-              )
-            else .
-            end
-          )' || InstallOK=false
-        printf "\n%s\n" "Starting PlexMediaServer service (JSON):"
-        /usr/syno/bin/synopkg start "PlexMediaServer" || InstallOK=false
+        install_plex_package "$PackagePath" || InstallOK=false
+        restore_plex_state || InstallOK=false
       else
         printf '\n %s\n' "* Downloaded package archive is corrupt or incomplete, skipping install.."
       fi
