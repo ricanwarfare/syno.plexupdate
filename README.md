@@ -243,10 +243,38 @@ This will:
 1. Find the highest package version older than the installed version, using the archived package metadata (one older package is sufficient)
 2. Stop Plex Media Server
 3. Install the previous package
-4. Restart Plex Media Server
-5. Verify the selected version was installed and the restart command succeeded, then report success/failure via DSM notification
+4. Restore the original running/stopped service state
+5. Verify the selected version was installed and service restoration succeeded, then report success/failure via DSM notification
 
-Rollback skips archive age cleanup so an older package is not deleted before it can be used. A failed rollback exits with status 1.
+Rollback skips DNS/connectivity checks, GitHub release checks, and script self-update
+(including `SelfUpdate=1` and `-m`). It requires only a readable local older package
+in `Archive/Packages`; it never downloads a missing rollback package. Rollback also
+skips archive age cleanup so an older package is not deleted before use. A failed
+rollback exits with status 1.
+
+### Interrupted installs and service recovery
+
+Both updates and rollbacks check the local Plex service state before stopping it.
+An unrecognized/malformed status, nonzero status-query exit, or DSM diagnostic error aborts before installation. This deliberately refuses ambiguous stopped-state responses rather than guessing. A service that was
+running is restarted after installation or a caught interruption; one that was
+already stopped is kept stopped (including after an installation failure).
+
+`INT`, `TERM`, and `HUP` request cancellation of the updater, not a forced kill of
+the package manager. If a stop/install/start operation is in flight, cancellation
+is deferred until that tracked `synopkg` process returns. Only then is the original
+service state restored and the updater lock released. Repeated signals during
+cleanup are ignored. This intentionally avoids killing an installer which DSM may
+have delegated internally, or starting Plex concurrently with that installer.
+There is no timeout that forcibly unlocks a still-running package operation: a
+hung installer requires operator investigation. Signal exits retain status 130,
+143, or 129 respectively; recovery failure is logged, not reported as success.
+
+`SIGKILL`, power loss, and a DSM package manager that returns before its delegated
+work completes cannot be made safe by Bash traps. After such an event, inspect
+Package Center and confirm no package operation/updater remains before manually
+restoring Plex's intended state and removing the stale lock. An equal-version run
+is **not** a persistent recovery mechanism. No automatic retry of an interrupted
+installation or package/database repair is attempted.
 
 ### Force Install (Skip Age Check)
 
@@ -315,11 +343,14 @@ Many thanks to:
 ### Local regression checks
 
 Run `python3 -m unittest discover -s tests -v` and `bash -n syno.plexupdate.sh`.
-The tests execute isolated sections of the updater with temporary archives and mocked
-Synology commands; they do not install packages or contact Plex.
+The tests execute isolated sections and a path-remapped full entrypoint with temporary
+archives and mocked Synology/network commands; they never run the real updater against
+host services or install packages. Signal tests use bounded mock installers and check
+that recovery and lock release cannot race an installer or a competing invocation.
 
 The updater uses an atomic lock directory at `/tmp/syno.plexupdate.lock.d`.
-Normal exits and termination signals release the lock. After an uncatchable kill,
-verify that no updater is running before removing that directory manually.
+Normal exits and caught termination signals release the lock after pending package
+operations and service recovery finish. After an uncatchable kill, verify that no
+updater or package operation is running before removing that directory manually.
 Logs are restricted to their owner. Numeric configuration values must be nonnegative
 integers with at most nine digits; `SelfUpdate` must be `0` or `1`.
