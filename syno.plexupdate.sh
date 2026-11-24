@@ -57,13 +57,17 @@ redact_secrets_from_logs() {
 # delegate installation to another process. Defer cancellation until it returns.
 PackagePID=""
 RecoveryAction=""
+RecoveryRunning=false
+RecoveryFailed=false
 InstallOutput=""
 PackageLaunching=false
 CancellationStatus=0
+CancellationGeneration=0
 cancel_updater() {
   # Do not exit between spawning an operation and recording its PID.
-  if [ "$PackageLaunching" = true ]; then
-    CancellationStatus=$1
+  if [ "$PackageLaunching" = true ] || [ "$RecoveryRunning" = true ]; then
+    CancellationGeneration=$((CancellationGeneration + 1))
+    [ "$CancellationStatus" -ne 0 ] || CancellationStatus=$1
   else
     exit "$1"
   fi
@@ -73,22 +77,42 @@ run_package_operation() {
   /usr/syno/bin/synopkg "$@" &
   PackagePID=$!
   PackageLaunching=false
-  [ "$CancellationStatus" -eq 0 ] || exit "$CancellationStatus"
+  if [ "$RecoveryRunning" = false ] && [ "$CancellationStatus" -ne 0 ]; then
+    exit "$CancellationStatus"
+  fi
   wait_package_operation
 }
 wait_package_operation() {
-  local rc=0
+  local rc=0 generation
   if [ -n "$PackagePID" ]; then
-    wait "$PackagePID" || rc=$?
+    while true; do
+      rc=0
+      generation=$CancellationGeneration
+      wait "$PackagePID" || rc=$?
+      # Restore owns cancellation until its result has been recorded. Signals
+      # interrupt Bash's wait, not synopkg; reap its real result on the next wait.
+      if [ "$RecoveryRunning" = true ] && [ "$generation" -ne "$CancellationGeneration" ]; then
+        continue
+      fi
+      break
+    done
     PackagePID=""
   fi
   return "$rc"
 }
 restore_plex_state() {
   [ -n "$RecoveryAction" ] || return 0
-  printf '\n %s\n' "* Restoring Plex service state ($RecoveryAction)."
-  run_package_operation "$RecoveryAction" "PlexMediaServer" || return 1
+  local action rc=0
+  # Defer cancellation before disarming recovery, including the launch window.
+  RecoveryRunning=true
+  action=$RecoveryAction
   RecoveryAction=""
+  printf '\n %s\n' "* Restoring Plex service state ($action)."
+  run_package_operation "$action" "PlexMediaServer" || rc=$?
+  [ "$rc" -eq 0 ] || RecoveryFailed=true
+  RecoveryRunning=false
+  [ "$CancellationStatus" -eq 0 ] || exit "$CancellationStatus"
+  return "$rc"
 }
 prepare_plex_install() {
   local state
@@ -129,7 +153,7 @@ cleanup_updater() {
   CancellationStatus=0
   PackageLaunching=false
   wait_package_operation || true
-  if ! restore_plex_state; then
+  if ! restore_plex_state || [ "$RecoveryFailed" = true ]; then
     printf ' %s\n' '* Plex service recovery failed; inspect Package Center before retrying.'
     [ "$rc" -ne 0 ] || rc=1
   fi

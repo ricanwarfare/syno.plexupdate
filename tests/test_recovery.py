@@ -120,6 +120,80 @@ esac
                     proc.kill()
                     proc.communicate(timeout=5)
 
+    def test_cancellation_during_restore_does_not_repeat_operation(self):
+        for state, action, restore_rc in [('running', 'start', 0), ('stopped', 'stop', 0),
+                                          ('running', 'start', 7), ('stopped', 'stop', 7),
+                                          ('running', 'start', 143)]:
+            with self.subTest(state=state, restore_rc=restore_rc), tempfile.TemporaryDirectory() as tmp:
+                root, env = self.fixture(tmp, state)
+                stub = root / 'bin/synopkg'
+                stub.write_text(stub.read_text().replace(
+                    'case "$1" in',
+                    '''if [ "$1" = "$RESTORE_ACTION" ] && grep -q install-finished "$FIXTURE/calls"; then
+  touch "$FIXTURE/restoring"
+  while [ ! -e "$FIXTURE/release-restore" ]; do sleep .01; done
+  echo restore-finished >> "$FIXTURE/calls"
+  [ "$RESTORE_RC" = 0 ] || exit "$RESTORE_RC"
+fi
+case "$1" in'''))
+                proc = subprocess.Popen(['bash', str(root / 'updater.sh'), '-r'],
+                                        env=dict(env, RESTORE_ACTION=action, RESTORE_RC=str(restore_rc)),
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 8
+                    while not (root / 'restoring').exists() and proc.poll() is None and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue((root / 'restoring').exists(), 'restore did not start')
+                    proc.send_signal(signal.SIGTERM)
+                    time.sleep(.1)
+                    self.assertIsNone(proc.poll())
+                    self.assertTrue((root / 'lock').is_dir())
+                    proc.send_signal(signal.SIGINT)
+                    proc.send_signal(signal.SIGHUP)
+                    contender = subprocess.run(['bash', str(root / 'updater.sh'), '-r'], env=env,
+                                               capture_output=True, text=True, timeout=3)
+                    self.assertEqual(contender.returncode, 1)
+                    self.assertIn('Another instance', contender.stdout)
+                    self.assertTrue((root / 'lock').is_dir())
+                    (root / 'release-restore').touch()
+                    out, err = proc.communicate(timeout=8)
+                    self.assertEqual(proc.returncode, 143, out + err)
+                    calls = (root / 'calls').read_text().splitlines()
+                    self.assertEqual(calls.count('restore-finished'), 1, calls)
+                    self.assertEqual(calls.count(action), 1 if action == 'start' else 2, calls)
+                    self.assertEqual((root / 'state').read_text().strip(), state if restore_rc == 0 else 'stopped')
+                    self.assertEqual('Plex service recovery failed' in out, restore_rc != 0, out + err)
+                    self.assertFalse((root / 'lock').exists())
+                finally:
+                    (root / 'release-restore').touch()
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.communicate(timeout=5)
+
+    def test_restore_cancellation_at_disarm_and_pid_assignment_is_deferred(self):
+        for state, action in [('running', 'start'), ('stopped', 'stop')]:
+            for point in ('disarm', 'pid'):
+                with self.subTest(state=state, point=point), tempfile.TemporaryDirectory() as tmp:
+                    root, env = self.fixture(tmp, state)
+                    script = root / 'updater.sh'
+                    code = script.read_text()
+                    if point == 'disarm':
+                        code = code.replace('  RecoveryAction=""\n',
+                                            '  RecoveryAction=""\n  kill -TERM "$$"\n')
+                    else:
+                        code = code.replace('  PackagePID=$!\n',
+                                            '  if [ "$RecoveryRunning" = true ]; then kill -TERM "$$"; fi\n  PackagePID=$!\n')
+                    self.assertNotEqual(code, script.read_text(), 'injection point missing')
+                    script.write_text(code)
+                    result = subprocess.run(['bash', str(script), '-r'], env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+                    calls = (root / 'calls').read_text().splitlines()
+                    self.assertEqual(calls.count(action), 1 if action == 'start' else 2, calls)
+                    self.assertEqual((root / 'state').read_text().strip(), state)
+                    self.assertNotIn('Plex service recovery failed', result.stdout)
+                    self.assertFalse((root / 'lock').exists())
+
     def test_signal_between_launch_and_pid_assignment_recovers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, env = self.fixture(tmp)
